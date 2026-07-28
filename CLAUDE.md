@@ -92,6 +92,11 @@ Never commit `config.json`, never hardcode a key, and never print config values 
 one. The three runtime files — `config.json`, `jarvis_memory.json`, `reminders.json` — are all
 gitignored.
 
+One key is read but undeclared: `info.weather` does `config.get("city", "")`, and `city` is not in
+`DEFAULT_CONFIG`, so it never lands in a generated `config.json` and weather always auto-detects by
+IP. Users have to add it by hand. Either add it to `DEFAULT_CONFIG` or leave it — just don't assume
+a key exists in `config.json` because some module reads it.
+
 Note that `memory_file` and `REMINDERS_FILE` are **relative paths**, so state lands in the current
 working directory. Run the app from the repo root or state will appear to vanish between runs.
 
@@ -119,10 +124,19 @@ Every returned string is spoken aloud. Keep responses to one or two sentences, a
 `Mouth.say` will read. The multi-line listings in `files.py` are an accepted exception because
 they're primarily read on screen.
 
-Skills must never raise. Wrap fallible work in `try/except` and return an apologetic string; an
+Skills should not raise. Wrap fallible work in `try/except` and return an apologetic string; an
 uncaught exception in voice mode is caught by the loop in `main.py:117` but costs the user their
-turn. Optional dependencies (`psutil`, `pyautogui`, `playwright`) are imported **inside** the
-function that needs them so a missing package degrades one skill instead of breaking startup.
+turn. This is the convention for new code, not a property the existing code fully has —
+`tools.system_status` catches only `ImportError`, and `pc_control.web_search` and the three
+functions in `files.py` have no handler at all. Don't assume a skill is already safe because the
+convention says so.
+
+Heavy or platform-specific imports go **inside** the function that needs them (`psutil` in
+`tools.py:54` and `ui_server.py:37`, `pyautogui` in `pc_control.py:61`, `pyttsx3` in the reminder
+thread at `tools.py:41`, `playwright` in `browser.py:17`) so one broken package degrades one skill
+instead of breaking startup. Note that only `playwright` is genuinely optional — `psutil`,
+`pyautogui`, and `pyttsx3` are all declared in `requirements.txt`; they're lazy-imported for
+startup isolation, not because they're expected to be missing.
 
 ## The Brain
 
