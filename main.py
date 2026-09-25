@@ -514,6 +514,17 @@ def _is_reconnect_signal(exc: BaseException) -> bool:
     return False
 
 
+def _leaf_errors_text(exc: BaseException) -> str:
+    """The messages of the real failures inside a (nested) exception group.
+
+    str() of a TaskGroup failure is always "unhandled errors in a TaskGroup (N
+    sub-exception)", which hides the cause from every substring test below —
+    and contains "handle", which read as a rejected resumption handle."""
+    if isinstance(exc, BaseExceptionGroup):
+        return " | ".join(_leaf_errors_text(sub) for sub in exc.exceptions)
+    return f"{type(exc).__name__}: {exc}"
+
+
 def _keep_context_of(exc: BaseException) -> bool:
     """Read `keep_context` off a reconnect signal, unwrapping the group the
     TaskGroup put it in. Defaults to True: an unexpected shape must not silently
@@ -544,6 +555,7 @@ class JarvisLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        self._generating           = False   # True between a reply's first audio and its turn_complete
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
         self._visemes              = VisemeStream()
@@ -913,7 +925,10 @@ class JarvisLive:
 
     def interrupt(self) -> None:
         """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
-        self._interrupted = True
+        # Only a reply still being generated has a turn_complete coming to clear
+        # the flag; set it otherwise and the NEXT reply is silently discarded.
+        if self._generating:
+            self._interrupted = True
         q = self.audio_in_queue
         if q:
             drained = 0
@@ -1163,7 +1178,7 @@ class JarvisLive:
                 else:
                     self._vision_busy      = True
                     self._vision_last_time = _now
-                    angle     = args.get("angle", "screen").lower()
+                    angle     = str(args.get("angle") or "screen").lower()
                     user_text = args.get("text", "What do you see?")
                     if angle == "camera":
                         img_b, mime_t = await loop.run_in_executor(None, _capture_camera)
@@ -1257,6 +1272,10 @@ class JarvisLive:
             result = f"Tool '{name}' failed: {e}"
             traceback.print_exc()
             self.speak_error(name, e)
+            if name == "screen_process":
+                # Only a delivered frame clears these; a failed capture never gets one.
+                self._vision_busy       = False
+                self._vision_cam_active = False
 
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
@@ -1478,6 +1497,7 @@ class JarvisLive:
                             self._resume_handle = _sru.new_handle
 
                     if response.data:
+                        self._generating = True
                         if self._interrupted:
                             pass  # discard: interrupted
                         else:
@@ -1517,6 +1537,7 @@ class JarvisLive:
                                 self._last_user_speech = time.monotonic()
 
                         if sc.turn_complete:
+                            self._generating = False
                             if self._turn_done_event:
                                 self._turn_done_event.set()
 
@@ -2109,6 +2130,7 @@ class JarvisLive:
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+                    self._generating           = False
 
                     print("[JARVIS] Connected.")
                     if _resumed_with:
@@ -2179,11 +2201,12 @@ class JarvisLive:
                 # assistant would never come back at all: the feature meant to
                 # survive a reconnect would be the thing preventing one. Drop it
                 # once and let the next attempt start clean.
+                err_str = _leaf_errors_text(e)
                 if _resumed_with and (
-                    "resum" in str(e).lower()
-                    or "handle" in str(e).lower()
-                    or "INVALID_ARGUMENT" in str(e)
-                    or "NOT_FOUND" in str(e)
+                    "resum" in err_str.lower()
+                    or re.search(r"\bhandle\b", err_str.lower())
+                    or "INVALID_ARGUMENT" in err_str
+                    or "NOT_FOUND" in err_str
                 ):
                     print("[JARVIS] 🔗 Resumption handle rejected — starting a fresh session")
                     self.ui.write_log("SYS: Could not restore the conversation — starting fresh.")
@@ -2191,8 +2214,7 @@ class JarvisLive:
                     self._conn_backoff = 0
                     continue
 
-                err_str = str(e)
-                print(f"[JARVIS] Error ({type(e).__name__}): {e}")
+                print(f"[JARVIS] Error ({type(e).__name__}): {err_str}")
                 traceback.print_exc()
 
                 # Turn-taking / media / thinking knobs rejected by the server
