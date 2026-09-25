@@ -1,6 +1,7 @@
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -260,26 +261,35 @@ def _schedule_mac(target_dt: datetime, task_name: str,
 def _schedule_linux(target_dt: datetime, task_name: str,
                     script_path: Path) -> str:
 
-    if shutil.which("systemd-run"):
+    if shutil.which("systemctl"):
+        # Real unit files with Persistent=true: a systemd-run timer is transient
+        # and silently vanished on reboot or logout. Persistent also fires a
+        # reminder that came due while the machine was off, once it is back.
         on_calendar = target_dt.strftime("%Y-%m-%d %H:%M:00")
-        result = subprocess.run(
-            [
-                "systemd-run",
-                "--user",
-                f"--on-calendar={on_calendar}",
-                f"--unit={task_name}",
-                "--",
-                sys.executable, str(script_path),
-            ],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
+        unit_dir = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd" / "user"
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        service, timer = unit_dir / f"{task_name}.service", unit_dir / f"{task_name}.timer"
+
+        def q(arg) -> str:          # systemd quoting; % starts a specifier
+            return '"' + str(arg).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+        service.write_text("[Unit]\nDescription=JARVIS reminder\n\n[Service]\nType=oneshot\n"
+                           f"ExecStart={q(sys.executable)} {q(script_path)}\n", encoding="utf-8")
+        timer.write_text("[Unit]\nDescription=JARVIS reminder\n\n[Timer]\n"
+                         f"OnCalendar={on_calendar}\nPersistent=true\n\n"
+                         "[Install]\nWantedBy=timers.target\n", encoding="utf-8")
+        ok = all(subprocess.run(cmd, capture_output=True, text=True).returncode == 0 for cmd in (
+            ["systemctl", "--user", "daemon-reload"],
+            ["systemctl", "--user", "enable", "--now", timer.name],
+        ))
+        if ok:
             return task_name
-        print(f"[Reminder] ⚠️ systemd-run failed: {result.stderr.strip()}, trying 'at'")
+        service.unlink(missing_ok=True)
+        timer.unlink(missing_ok=True)
+        print("[Reminder] ⚠️ systemd user timer failed, trying 'at'")
 
     if shutil.which("at"):
         at_time = target_dt.strftime("%H:%M %Y-%m-%d")
-        cmd_str = f"{sys.executable} {script_path}\n"
+        cmd_str = f"{shlex.quote(sys.executable)} {shlex.quote(str(script_path))}\n"
         result  = subprocess.run(
             ["at", at_time],
             input=cmd_str, capture_output=True, text=True,
