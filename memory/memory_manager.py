@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from datetime import datetime
 from threading import Lock
@@ -69,7 +70,37 @@ def load_memory() -> dict:
             return _empty_memory()
         except Exception as e:
             print(f"[Memory] ⚠️ Load error: {e}")
+            _set_aside_unreadable(e)
             return _empty_memory()
+
+
+def _set_aside_unreadable(err: Exception) -> None:
+    """Move an unreadable store out of the way before anything can save over it.
+
+    Every writer is load → modify → write, so returning an empty memory alone
+    meant the next save replaced every stored fact with just the new one."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = MEMORY_PATH.with_name(f"long_term.corrupt-{stamp}.json")
+    try:
+        os.replace(MEMORY_PATH, backup)
+    except OSError:
+        return
+    if _trim_notifier:
+        try:
+            _trim_notifier(f"SYS: Memory file was unreadable ({err}) — kept it as {backup.name}")
+        except Exception:
+            pass
+
+
+def _write_memory_file(memory: dict) -> None:
+    """Write the whole store atomically. Caller holds _lock.
+
+    write_text truncates first, so a crash or full disk mid-write used to leave
+    a half-written file behind — which the next load then treated as empty."""
+    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = MEMORY_PATH.with_name(MEMORY_PATH.name + ".tmp")
+    tmp.write_text(json.dumps(memory, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, MEMORY_PATH)
 
 def _all_entries(memory: dict) -> list[tuple]:
     entries = []
@@ -119,12 +150,8 @@ def save_memory(memory: dict) -> None:
     if not isinstance(memory, dict):
         return
     memory = _trim_to_limit(memory)
-    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _write_memory_file(memory)
 
 
 def _truncate_value(val: str) -> str:
@@ -446,11 +473,7 @@ def save_session_summary(summary: str, language: str = "") -> None:
     sessions.append(entry)
     memory["sessions"] = sessions[-_SESSION_MAX:]
     with _lock:
-        MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _write_memory_file(memory)
     print(f"[Memory] 📝 Session saved ({entry['date']}): {summary[:60]}…")
 
 
@@ -469,10 +492,7 @@ def pop_last_session() -> dict | None:
                 return None
             entry = sessions.pop()          # remove the last entry
             memory["sessions"] = sessions
-            MEMORY_PATH.write_text(
-                json.dumps(memory, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            _write_memory_file(memory)
             return entry
         except Exception as e:
             print(f"[Memory] ⚠️ pop_last_session error: {e}")

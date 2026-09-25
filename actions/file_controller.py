@@ -50,7 +50,7 @@ def _undo_create(target: Path):
     return _fn
 
 
-def _undo_write(target: Path, previous: str | None):
+def _undo_write(target: Path, previous: bytes | None):
     """Reverse of a write: restore the old contents, or remove a file that did
     not exist before the write created it."""
     def _fn():
@@ -60,7 +60,7 @@ def _undo_write(target: Path, previous: str | None):
                 return f"Removed '{target.name}' — it did not exist before."
             return f"'{target.name}' is already gone."
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(previous, encoding="utf-8")
+        target.write_bytes(previous)
         return f"Restored the previous contents of '{target.name}'."
     return _fn
 
@@ -237,7 +237,7 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
         previous = None
         if existed:
             try:
-                previous = target.read_text(encoding="utf-8", errors="ignore")
+                previous = target.read_bytes()
             except Exception:
                 previous = None
         target.write_text(content, encoding="utf-8")
@@ -313,6 +313,8 @@ def move_file(path: str, name: str = "", destination: str = "") -> str:
 
         if dst.is_dir():
             dst = dst / src.name
+        if dst.exists():
+            return f"'{dst.name}' already exists in {dst.parent.name}/ — not overwriting it."
 
         dst.parent.mkdir(parents=True, exist_ok=True)
         origin = src.resolve()
@@ -342,6 +344,8 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
 
         if dst.is_dir():
             dst = dst / src.name
+        if dst.exists():
+            return f"'{dst.name}' already exists in {dst.parent.name}/ — not overwriting it."
 
         dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -424,16 +428,16 @@ def write_file(path: str, name: str = "", content: str = "",
 
         # Snapshot before writing. None means "did not exist", which is a
         # different undo (delete it) from "existed and had this in it".
-        previous: str | None = None
+        previous: bytes | None = None
         undoable = True
         if target.exists():
             try:
                 if target.stat().st_size > _UNDO_CONTENT_LIMIT:
                     undoable = False       # too large to hold in memory
                 else:
-                    previous = target.read_text(encoding="utf-8", errors="ignore")
+                    previous = target.read_bytes()
             except Exception:
-                undoable = False           # binary, locked, unreadable
+                undoable = False           # locked, unreadable
 
         mode = "a" if append else "w"
         with open(target, mode, encoding="utf-8") as f:
@@ -450,6 +454,9 @@ def write_file(path: str, name: str = "", content: str = "",
         return f"Could not write file: {e}"
 
 
+_SKIP_DIRS = {"node_modules", "__pycache__", "AppData", "Library", "venv", "site-packages"}
+
+
 def find_files(name: str = "", extension: str = "",
                path: str = "home", max_results: int = 20) -> str:
     try:
@@ -462,26 +469,39 @@ def find_files(name: str = "", extension: str = "",
         results    = []
         dir_count  = 0
         max_dirs   = 500  # performance + safety limit
+        truncated  = False
+        if extension:
+            extension = "." + extension.lstrip(".")
 
-        for item in search_path.rglob("*"):
-            if item.is_dir():
-                dir_count += 1
-                if dir_count > max_dirs:
+        for root, dirnames, filenames in os.walk(search_path):
+            # Hidden and cache trees (.cache, node_modules…) hold thousands of
+            # folders and never the file someone asks for by voice.
+            dirnames[:] = [d for d in dirnames
+                           if not d.startswith(".") and d not in _SKIP_DIRS]
+            dir_count += 1
+            if dir_count > max_dirs:
+                truncated = True
+                break
+            for fname in filenames:
+                item = Path(root) / fname
+                if extension and item.suffix.lower() != extension.lower():
+                    continue
+                if name and name.lower() not in fname.lower():
+                    continue
+                if not item.is_file():
+                    continue
+                size = _format_size(item.stat().st_size)
+                results.append(f"📄 {item.name} ({size}) — {item.parent}")
+                if len(results) >= max_results:
                     break
-                continue
-            if not item.is_file():
-                continue
-            if extension and item.suffix.lower() != extension.lower():
-                continue
-            if name and name.lower() not in item.name.lower():
-                continue
-            size = _format_size(item.stat().st_size)
-            results.append(f"📄 {item.name} ({size}) — {item.parent}")
             if len(results) >= max_results:
                 break
 
         if not results:
             query = name or extension or "files"
+            if truncated:
+                return (f"No {query} found in the first {max_dirs} folders of "
+                        f"{search_path.name}/ — try a narrower folder.")
             return f"No {query} found in {search_path.name}/"
 
         return f"Found {len(results)} file(s):\n" + "\n".join(results)
