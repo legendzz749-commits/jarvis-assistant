@@ -4,6 +4,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -70,7 +71,14 @@ if not notified:
 if not notified:
     try:
         import subprocess
-        subprocess.run(["msg", "*", "/TIME:30", message], check=False)
+        notified = subprocess.run(["msg", "*", "/TIME:30", message], check=False).returncode == 0
+    except Exception:
+        pass
+
+if not notified:
+    try:
+        import ctypes   # present on every Windows edition
+        ctypes.windll.user32.MessageBoxW(0, message, "J.A.R.V.I.S Reminder", 0x40 | 0x40000)
     except Exception:
         pass
 
@@ -308,7 +316,7 @@ def reminder(
 
     os_name    = _get_os()
     safe_msg   = _sanitise(message)
-    task_name  = f"JARVISReminder_{target_dt.strftime('%Y%m%d_%H%M%S')}"
+    task_name  = f"JARVISReminder_{target_dt.strftime('%Y%m%d_%H%M')}_{uuid.uuid4().hex[:8]}"
 
     try:
         script_path = _write_notify_script(task_name, safe_msg, os_name)
@@ -328,6 +336,7 @@ def reminder(
         return "Something went wrong while scheduling the reminder."
 
     if not job_id:
+        script_path.unlink(missing_ok=True)
         return "I couldn't register the reminder with the system scheduler."
 
     if player:
