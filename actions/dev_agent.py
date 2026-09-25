@@ -2,6 +2,7 @@ import subprocess
 import sys
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -52,15 +53,21 @@ def _is_rate_limit(error: Exception) -> bool:
     return "429" in msg or "quota" in msg or "resource_exhausted" in msg
 
 
-def _parse_traceback(output: str, project_files: list[str]) -> tuple[str | None, int | None]:
+def _parse_traceback(output: str, project_files: list[str],
+                     project_dir: Path | None = None) -> tuple[str | None, int | None]:
 
     pattern = re.compile(r'File ["\']([^"\']+\.py)["\'],\s+line\s+(\d+)', re.IGNORECASE)
     matches = pattern.findall(output)
 
     for raw_path, line_str in reversed(matches):
-        raw_name = Path(raw_path).name
+        frame = Path(raw_path)
         for pf in project_files:
-            if Path(pf).name == raw_name or pf == raw_path or raw_path.endswith(pf):
+            # The frame must be that file IN this project — matching the name
+            # alone blamed site-packages/requests/utils.py on the project's utils.py.
+            if project_dir is not None and frame.is_absolute():
+                if frame.resolve() == (project_dir / pf).resolve():
+                    return pf, int(line_str)
+            elif raw_path.replace("\\", "/") == pf.replace("\\", "/"):
                 return pf, int(line_str)
 
     return None, None
@@ -70,14 +77,14 @@ def _classify_error(output: str) -> str:
 
     low = output.lower()
 
-    if any(x in low for x in ("no module named", "modulenotfounderror", "importerror")):
-        return "dependency_error"
-
     if "syntaxerror" in low or "invalid syntax" in low:
         return "syntax_error"
-    
-    if "cannot import" in low or "importerror" in low:
+
+    if "cannot import" in low:
         return "import_error"
+
+    if any(x in low for x in ("no module named", "modulenotfounderror", "importerror")):
+        return "dependency_error"
 
     if any(x in low for x in (
         "traceback", "exception", "error:", "nameerror", "typeerror",
@@ -95,6 +102,8 @@ def _has_error(output: str, run_command: str) -> bool:
 
     if "timed out" in low:
         return False
+    if output.startswith(("Command not found", "Refusing to run", "Run error")):
+        return True
 
     if not output.strip():
         return False
@@ -302,10 +311,14 @@ def _open_vscode(project_dir: Path) -> bool:
         r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
     ]
     for cmd in vscode_candidates:
+        # No shell: with shell=True and a list, POSIX runs "code" alone and the
+        # project path is dropped; resolve the executable instead.
+        exe = cmd if Path(cmd).is_absolute() and Path(cmd).exists() else shutil.which(cmd)
+        if not exe:
+            continue
         try:
             subprocess.Popen(
-                [cmd, str(project_dir)],
-                shell=True,
+                [exe, str(project_dir)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
@@ -387,7 +400,7 @@ def _fix_files(
 
     model = _get_model(MODEL_PLANNER)
 
-    error_file, error_line = _parse_traceback(error_output, list(file_codes.keys()))
+    error_file, error_line = _parse_traceback(error_output, list(file_codes.keys()), project_dir)
     error_type = _classify_error(error_output)
 
     files_to_fix: list[str] = []
@@ -493,6 +506,10 @@ def _build_project(
     proj_name    = project_name or plan.get("project_name", "jarvis_project")
     proj_name    = re.sub(r"[^\w\-]", "_", proj_name)
     project_dir  = PROJECTS_DIR / proj_name
+    n = 2
+    while project_dir.exists() and any(project_dir.iterdir()):
+        project_dir = PROJECTS_DIR / f"{proj_name}-{n}"
+        n += 1
     project_dir.mkdir(parents=True, exist_ok=True)
 
     files        = plan.get("files", [])

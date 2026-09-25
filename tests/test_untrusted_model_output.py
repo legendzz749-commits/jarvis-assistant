@@ -1,6 +1,7 @@
 """Regression tests: model output and downloaded archives must not escape their boundaries."""
 import io
 import tarfile
+from pathlib import Path
 
 import pytest
 
@@ -72,3 +73,28 @@ def test_desktop_task_code_waits_for_the_user(tmp_path, hud):
     assert "CONFIRMATION_PENDING" in reply
     assert not marker.exists()
     assert code in hud[0][1]                     # the user sees what would run
+
+
+def test_library_frames_are_not_blamed_on_a_project_file():
+    tb = ('Traceback (most recent call last):\n'
+          '  File "/proj/main.py", line 3, in <module>\n'
+          '  File "/usr/lib/python3/site-packages/requests/utils.py", line 88, in get\n')
+    assert dev_agent._parse_traceback(tb, ["main.py", "utils.py"], Path("/proj")) == ("main.py", 3)
+
+
+def test_cannot_import_name_is_a_code_error_not_a_missing_package():
+    assert dev_agent._classify_error("ImportError: cannot import name 'x' from 'app'") == "import_error"
+    assert dev_agent._classify_error("ModuleNotFoundError: No module named 'flask'") == "dependency_error"
+
+
+def test_a_command_that_cannot_start_is_not_working():
+    assert dev_agent._has_error("Command not found: [Errno 2] node", "node main.js")
+
+
+def test_open_vscode_passes_the_project_without_a_shell(tmp_path, monkeypatch):
+    launched = []
+    monkeypatch.setattr(dev_agent.shutil, "which", lambda c: "/usr/bin/code" if c == "code" else None)
+    monkeypatch.setattr(dev_agent.subprocess, "Popen", lambda argv, **k: launched.append((argv, k.get("shell"))))
+    monkeypatch.setattr(dev_agent.time, "sleep", lambda _s: None)
+    assert dev_agent._open_vscode(tmp_path)
+    assert launched == [(["/usr/bin/code", str(tmp_path)], None)]
