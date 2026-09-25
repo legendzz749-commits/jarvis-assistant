@@ -116,3 +116,9 @@ def test_upload_support_follows_the_multipart_package():
     import importlib.util
     has_parser = bool(importlib.util.find_spec("python_multipart") or importlib.util.find_spec("multipart"))
     assert server._UPLOAD_OK == has_parser
+
+
+def test_without_cryptography_the_page_gets_no_cryptojs(dash, monkeypatch):
+    d, client, _ = dash
+    monkeypatch.setattr(server, "_CRYPTO_OK", False)
+    assert client.get("/static/crypto.js", follow_redirects=False).status_code == 404

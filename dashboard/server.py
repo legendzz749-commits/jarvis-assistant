@@ -33,6 +33,8 @@ except ImportError:
 # (fastapi itself always imports; what uploads need is the multipart parser)
 import importlib.util as _ilu
 _UPLOAD_OK = bool(_ilu.find_spec("python_multipart") or _ilu.find_spec("multipart"))
+# Without it the server cannot decrypt what the page encrypts with CryptoJS.
+_CRYPTO_OK = _ilu.find_spec("cryptography") is not None
 
 BASE_DIR    = Path(__file__).resolve().parent.parent
 STATIC_DIR  = Path(__file__).parent / "static"
@@ -582,6 +584,10 @@ class DashboardServer:
         # serve CryptoJS from local cache, fallback to CDN redirect
         @app.get("/static/crypto.js")
         async def serve_crypto():
+            if not _CRYPTO_OK:
+                # No CryptoJS on the page -> it sends plain text, which this
+                # server can read. (It encrypted every command, and all were dropped.)
+                return JSONResponse({"error": "encryption unavailable"}, status_code=404)
             if _CRYPTOJS_FILE.exists():
                 return FileResponse(str(_CRYPTOJS_FILE),
                                     media_type="application/javascript")

@@ -590,7 +590,11 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
-    if dependencies:
+    if dependencies and language.lower() != "python":
+        # pip cannot install npm packages; installing same-named PyPI projects
+        # into JARVIS's own environment was worse than doing nothing.
+        log(f"Install the project's dependencies with its package manager: {', '.join(dependencies)}")
+    elif dependencies:
         install_result = _install_dependencies(dependencies, project_dir)
         log(install_result)
 
@@ -617,7 +621,7 @@ def _build_project(
             break
 
         error_type = _classify_error(last_output)
-        if error_type == "dependency_error" and auto_installs < 3:
+        if error_type == "dependency_error" and auto_installs < 3 and language.lower() == "python":
             installed = _try_auto_install(last_output, project_dir)
             if installed:
                 auto_installs += 1
