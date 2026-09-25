@@ -381,7 +381,7 @@ Your files and settings stay on your machine. There is no MARK server, no teleme
 
 | What | Where | Notes |
 |---|---|---|
-| Gemini API key, plugin credentials | `config/api_keys.json` | **Plaintext.** Anyone with your user account can read it. Treat it like a password file. |
+| Gemini API key, plugin credentials | `config/api_keys.json` | **Plaintext**, readable only by your user account (the app writes it owner-only on macOS and Linux). Treat it like a password file. |
 | Dashboard TLS certificate + private key | `config/certs/` | Generated locally, self-signed, never leaves the machine. |
 | What the assistant remembers about you | `memory/long_term.json` | Delete the file to make it forget everything. |
 

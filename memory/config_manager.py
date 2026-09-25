@@ -42,6 +42,10 @@ def _write_config(data: dict) -> None:
     ensure_config_dir()
     tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)     # API key and plugin passwords: owner only
+    except OSError:
+        pass
     os.replace(tmp, CONFIG_FILE)
 
 

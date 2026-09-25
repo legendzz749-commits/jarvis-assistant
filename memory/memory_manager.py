@@ -108,6 +108,10 @@ def _write_memory_file(memory: dict) -> None:
     MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = MEMORY_PATH.with_name(MEMORY_PATH.name + ".tmp")
     tmp.write_text(json.dumps(memory, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)     # personal facts: owner only
+    except OSError:
+        pass
     os.replace(tmp, MEMORY_PATH)
 
 def _all_entries(memory: dict) -> list[tuple]:

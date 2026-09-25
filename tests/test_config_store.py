@@ -28,3 +28,13 @@ def test_vision_camera_cache_keeps_other_settings(config_file):
     config_file.write_text(json.dumps(SETTINGS))
     screen_processor._save_config_key("camera_index", 1)
     assert json.loads(config_file.read_text()) == {**SETTINGS, "camera_index": 1}
+
+
+def test_config_file_is_private_to_the_user(config_file):
+    import os
+    import stat
+    import sys
+    if sys.platform == "win32":
+        return
+    cm.save_voice("Kore")
+    assert stat.S_IMODE(os.stat(config_file).st_mode) == 0o600

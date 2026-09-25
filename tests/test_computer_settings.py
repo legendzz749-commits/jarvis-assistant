@@ -206,3 +206,9 @@ def test_screen_find_sends_logical_size_on_retina(monkeypatch):
     monkeypatch.setattr(gemini, "call", fake_call)
     assert cc._screen_find("the OK button") == (700, 450)
     assert sent == [(1440, 900)]
+
+
+def test_random_password_is_not_logged(capsys):
+    from actions import computer_control as cc
+    pw = cc.computer_control({"action": "random_data", "type": "password"})
+    assert len(pw) == 12 and pw not in capsys.readouterr().out

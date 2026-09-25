@@ -2064,7 +2064,8 @@ class JarvisLive:
             self._phone_active = True   # phone is streaming — silence PC mic
             with self._speaking_lock:
                 speaking = self._is_speaking
-            if not speaking and not self.ui.muted:
+            asleep = self._wake_enabled and not self._awake
+            if not speaking and not self.ui.muted and not asleep:
                 try:
                     self.out_queue.put_nowait(chunk)
                 except asyncio.QueueFull:

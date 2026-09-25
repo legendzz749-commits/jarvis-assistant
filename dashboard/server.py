@@ -118,7 +118,7 @@ def _ensure_network_access(port: int) -> None:
     macOS   : osascript admin dialog if the Application Firewall is on.
     Linux   : pkexec GUI → sudo -n → prints manual command as fallback.
     """
-    import sys, subprocess, os, shutil, tempfile, threading
+    import sys, subprocess, os, shlex, shutil, tempfile, threading
 
     # ── Windows ──────────────────────────────────────────────────────────────
     if sys.platform == "win32":
@@ -249,8 +249,10 @@ def _ensure_network_access(port: int) -> None:
             print("[Dashboard] One-time network setup — enter your password in the macOS dialog.")
             subprocess.run(
                 ["osascript", "-e",
-                 f'do shell script "{fw_ctl} --add {py} && {fw_ctl} --unblockapp {py}"'
-                 f' with administrator privileges'],
+                 # quoted for the shell, then escaped for the AppleScript string
+                 'do shell script "' + (f"{fw_ctl} --add {shlex.quote(py)} && "
+                                        f"{fw_ctl} --unblockapp {shlex.quote(py)}")
+                 .replace("\\", "\\\\").replace('"', '\\"') + '" with administrator privileges'],
                 timeout=60,
             )
         except Exception:

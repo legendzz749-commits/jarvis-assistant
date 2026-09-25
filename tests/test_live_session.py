@@ -113,3 +113,21 @@ def test_a_slow_tool_does_not_stop_the_receive_loop():
         await task
     asyncio.run(run())
     assert sent == [["dev_agent"]]
+
+
+def test_phone_mic_is_not_streamed_while_asleep():
+    import threading
+
+    async def run():
+        q = asyncio.Queue()
+        out = asyncio.Queue()
+        live = _live(_wake_enabled=True, _awake=False, _speaking_lock=threading.Lock(),
+                     _is_speaking=False, out_queue=out, _phone_active=False,
+                     _dashboard=SimpleNamespace(_phone_audio_queue=q))
+        live.ui.muted = False
+        await q.put({"data": b"\x00" * 320, "mime_type": "audio/pcm"})
+        task = asyncio.create_task(live._relay_phone_audio())
+        await asyncio.sleep(0.1)
+        task.cancel()
+        return out.qsize()
+    assert asyncio.run(run()) == 0
