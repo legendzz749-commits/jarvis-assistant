@@ -871,6 +871,10 @@ class DashboardServer:
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
             safe = re.sub(r'[/\\]', '', filename)
             path = self._uploads_dir / safe
+            # On Windows "D:secrets.kdbx" has no slash yet points at drive D;
+            # only a file directly inside the uploads folder may be served.
+            if path.resolve().parent != self._uploads_dir.resolve():
+                return JSONResponse({"error": "Not found"}, status_code=404)
             if not path.exists() or not path.is_file():
                 return JSONResponse({"error": "Not found"}, status_code=404)
             return FileResponse(str(path), filename=safe)

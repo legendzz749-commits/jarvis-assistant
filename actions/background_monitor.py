@@ -46,9 +46,9 @@ def _load() -> dict:
 
 def _save(monitors: dict) -> None:
     from memory.memory_manager import load_memory, _lock, _write_memory_file
-    memory = load_memory()
-    memory["monitors"] = monitors
-    with _lock:
+    with _lock:                       # one read-modify-write, not two separate steps
+        memory = load_memory()
+        memory["monitors"] = monitors
         _write_memory_file(memory)
 
 

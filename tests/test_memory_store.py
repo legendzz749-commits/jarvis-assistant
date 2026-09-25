@@ -49,3 +49,31 @@ def test_session_summary_round_trip(mem_path):
     assert mm.pop_last_session()["summary"] == "Talked about the roadmap."
     assert mm.pop_last_session() is None
     assert mm.load_memory()["identity"] == FACTS["identity"]
+
+
+def test_a_fact_named_value_does_not_replace_its_category(mem_path):
+    mm.save_memory(json.loads(json.dumps(FACTS)))
+    mm.update_memory({"relationships": {"value": {"value": "a key literally named value"}}})
+    rel = mm.load_memory()["relationships"]
+    assert "ayse_sister" in rel and "value" in rel
+
+
+def test_concurrent_writers_do_not_lose_updates(mem_path):
+    import threading
+    mm.save_memory(mm._empty_memory())
+    threads = [threading.Thread(target=mm.update_memory,
+                                args=({"notes": {f"n{i}": {"value": str(i)}}},))
+               for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(mm.load_memory()["notes"]) == 20
+
+
+def test_a_non_dict_category_does_not_break_the_prompt(mem_path):
+    mem_path.write_text(json.dumps({"identity": {"name": {"value": "Tony"}},
+                                    "preferences": ["coffee", "tea"]}), encoding="utf-8")
+    memory = mm.load_memory()
+    assert memory["preferences"] == {} and memory["_preferences_unreadable"] == ["coffee", "tea"]
+    mm.format_memory_for_prompt(memory)

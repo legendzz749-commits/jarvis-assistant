@@ -2,7 +2,7 @@ import json
 import os
 import re
 from datetime import datetime
-from threading import Lock
+from threading import RLock
 from pathlib import Path
 import sys
 
@@ -15,7 +15,10 @@ def get_base_dir() -> Path:
 
 BASE_DIR         = get_base_dir()
 MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
-_lock            = Lock()
+# Re-entrant, so one writer can hold it across its whole load → modify → save;
+# held only around the single read and write, concurrent writers (a tool call
+# and the monitor thread) overwrote each other's changes.
+_lock            = RLock()
 MAX_VALUE_LENGTH = 380
 
 # ── Why there are two very different numbers here ────────────────────────────
@@ -65,6 +68,11 @@ def load_memory() -> dict:
                 base = _empty_memory()
                 for key in base:
                     if key not in data:
+                        data[key] = {}
+                    elif not isinstance(data[key], dict):
+                        # A hand-edited list/string here crashed prompt building,
+                        # so no session could connect. Keep it, out of the way.
+                        data[f"_{key}_unreadable"] = data[key]
                         data[key] = {}
                 return data
             return _empty_memory()
@@ -160,18 +168,21 @@ def _truncate_value(val: str) -> str:
     return val
 
 
-def _recursive_update(target: dict, updates: dict) -> bool:
+def _recursive_update(target: dict, updates: dict, _depth: int = 0) -> bool:
     changed = False
     for key, value in updates.items():
         if value is None:
             continue
         if isinstance(value, str) and not value.strip():
             continue
-        if isinstance(value, dict) and "value" not in value:
+        # The top level is always categories: a fact whose key is "value"
+        # ({"notes": {"value": …}}) used to be read as an entry and replaced
+        # the whole category.
+        if isinstance(value, dict) and ("value" not in value or _depth == 0):
             if key not in target or not isinstance(target[key], dict):
                 target[key] = {}
                 changed = True
-            if _recursive_update(target[key], value):
+            if _recursive_update(target[key], value, _depth + 1):
                 changed = True
         else:
             new_val  = _truncate_value(str(value["value"] if isinstance(value, dict) else value))
@@ -186,10 +197,11 @@ def _recursive_update(target: dict, updates: dict) -> bool:
 def update_memory(memory_update: dict) -> dict:
     if not isinstance(memory_update, dict) or not memory_update:
         return load_memory()
-    memory = load_memory()
-    if _recursive_update(memory, memory_update):
-        save_memory(memory)
-        print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
+    with _lock:
+        memory = load_memory()
+        if _recursive_update(memory, memory_update):
+            save_memory(memory)
+            print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
     return memory
 
 def _entry_value(entry) -> str:
@@ -437,13 +449,14 @@ def remember(key: str, value: str, category: str = "notes") -> str:
 
 
 def forget(key: str, category: str = "notes") -> str:
-    memory = load_memory()
-    cat    = memory.get(category, {})
-    if key in cat:
-        del cat[key]
-        memory[category] = cat
-        save_memory(memory)
-        return f"Forgotten: {category}/{key}"
+    with _lock:
+        memory = load_memory()
+        cat    = memory.get(category, {})
+        if key in cat:
+            del cat[key]
+            memory[category] = cat
+            save_memory(memory)
+            return f"Forgotten: {category}/{key}"
     return f"Not found: {category}/{key}"
 
 
@@ -460,19 +473,19 @@ def save_session_summary(summary: str, language: str = "") -> None:
     summary = (summary or "").strip()
     if not summary:
         return
-    memory   = load_memory()
-    sessions = memory.get("sessions", [])
-    if not isinstance(sessions, list):
-        sessions = []
     entry: dict = {
         "date":    datetime.now().strftime("%Y-%m-%d"),
         "summary": summary[:280],
     }
     if language:
         entry["language"] = language
-    sessions.append(entry)
-    memory["sessions"] = sessions[-_SESSION_MAX:]
     with _lock:
+        memory   = load_memory()
+        sessions = memory.get("sessions", [])
+        if not isinstance(sessions, list):
+            sessions = []
+        sessions.append(entry)
+        memory["sessions"] = sessions[-_SESSION_MAX:]
         _write_memory_file(memory)
     print(f"[Memory] 📝 Session saved ({entry['date']}): {summary[:60]}…")
 
