@@ -51,3 +51,28 @@ def test_taskgroup_failure_text_names_the_real_error():
     text = main._leaf_errors_text(group)
     assert "API key not valid" in text
     assert "unhandled" not in text               # the wrapper read as a rejected "handle"
+
+
+def test_prompt_clock_does_not_depend_on_am_pm():
+    import inspect
+    src = inspect.getsource(main.JarvisLive._build_config)
+    assert "%p" not in src and "%H:%M" in src
+
+
+def test_missing_microphone_keeps_the_session(monkeypatch):
+    logs = []
+    live = _live()
+    live.ui.write_log = logs.append
+
+    def no_mic(*a, **k):
+        raise main.sd.PortAudioError("no input device")
+    monkeypatch.setattr(main.sd, "InputStream", no_mic)
+    monkeypatch.setattr(main, "get_input_device", lambda: "")
+
+    async def run():
+        task = asyncio.ensure_future(live._listen_audio())
+        await asyncio.sleep(0.3)
+        assert not task.done(), task.exception() if task.done() else None
+        task.cancel()
+    asyncio.run(run())
+    assert any("microphone" in m.lower() for m in logs)

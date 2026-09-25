@@ -560,6 +560,7 @@ class JarvisLive:
         # loop as words arrive, drained by the playback loop against the audio.
         self._visemes              = VisemeStream()
         self._last_out_logged      = ""      # de-dupes a re-sent transcript tail
+        self._connected_once       = False   # only the first connect starts asleep (wake word)
         # Push-to-talk
         self._ptt_enabled          = False
         self._ptt_held             = False
@@ -849,6 +850,7 @@ class JarvisLive:
         if self._wake_enabled and not self._awake:
             self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
             return
+        self._last_out_logged = ""        # a new exchange: an identical answer is not a repeat
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -981,7 +983,7 @@ class JarvisLive:
         sys_prompt = _load_system_prompt()
 
         now      = datetime.now()
-        time_str = now.strftime("%A, %B %d, %Y — %I:%M %p")
+        time_str = now.strftime("%A, %B %d, %Y — %H:%M (24-hour)")
         time_ctx = (
             f"[CURRENT DATE & TIME]\n"
             f"Right now it is: {time_str}\n"
@@ -1430,7 +1432,10 @@ class JarvisLive:
                     await asyncio.sleep(0.1)
         except Exception as e:
             print(f"[JARVIS] ❌ Mic: {e}")
-            raise
+            # Raising here tore the whole session down and rebuilt it every few
+            # seconds, forever, so typing and the phone could not be used either.
+            self.ui.write_log("SYS: No usable microphone — typing and the phone still work.")
+            await asyncio.Event().wait()     # stays until the session is torn down
 
     async def _flush_pending_vision(self) -> bool:
         """Send a captured frame immediately after its tool response.
@@ -1729,9 +1734,21 @@ class JarvisLive:
                 except Exception:
                     pass
 
+                write = asyncio.ensure_future(asyncio.to_thread(stream.write, bytes(batch)))
                 try:
-                    await asyncio.to_thread(stream.write, bytes(batch))
-                except (RuntimeError, asyncio.CancelledError):
+                    await asyncio.shield(write)
+                except asyncio.CancelledError:
+                    # Session teardown. The write is still running in a worker
+                    # thread; closing the stream under it (the finally below) is
+                    # a use-after-free inside PortAudio. Abort, let it return,
+                    # then close.
+                    stream.abort()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(write), 1.0)
+                    except Exception:
+                        pass
+                    raise
+                except RuntimeError:
                     break   # executor shutting down — exit cleanly
         except Exception as e:
             print(f"[JARVIS] ❌ Play: {e}")
@@ -2048,6 +2065,7 @@ class JarvisLive:
                     # has no desktop WAKE button — so it wakes JARVIS if asleep.
                     if self._wake_enabled and not self._awake:
                         self.wake(reason="remote command")
+                    self._last_out_logged = ""
                     await self.session.send_client_content(
                         turns={"role": "user", "parts": [{"text": text}]},
                         turn_complete=True,
@@ -2143,7 +2161,7 @@ class JarvisLive:
 
                     # Wake word: if enabled, come up ASLEEP (mic gated, silent)
                     # until the user says "Hey Jarvis" or taps wake in the UI.
-                    if self._wake_enabled:
+                    if self._wake_enabled and (not self._connected_once or not self._awake):
                         self._ensure_wake_detector()
                         self._awake = False
                         self.ui.set_state("SLEEPING")
@@ -2152,6 +2170,8 @@ class JarvisLive:
                         self._awake = True
                         self.ui.set_state("LISTENING")
                         self.ui.write_log("SYS: JARVIS online.")
+
+                    self._connected_once = True
 
                     if self._dashboard:
                         await self._dashboard.broadcast({"type": "status", "state": "active"})
@@ -2292,10 +2312,12 @@ class JarvisLive:
 
 def main():
     ui = JarvisUI("face.png")
+    live: dict = {}
 
     def runner():
         ui.wait_for_api_key()
         jarvis = JarvisLive(ui)
+        live["jarvis"] = jarvis
         try:
             asyncio.run(jarvis.run())
         except KeyboardInterrupt:
@@ -2303,6 +2325,16 @@ def main():
 
     threading.Thread(target=runner, daemon=True).start()
     ui.root.mainloop()
+
+    # Closing the window is the normal way to quit, and the runner thread is a
+    # daemon — without this the "yesterday we talked about…" summary is never saved.
+    jarvis = live.get("jarvis")
+    if jarvis and jarvis._loop and jarvis._loop.is_running():
+        try:
+            asyncio.run_coroutine_threadsafe(
+                jarvis._save_session_summary(), jarvis._loop).result(timeout=15)
+        except Exception as e:
+            print(f"[JARVIS] Session summary not saved: {e}")
 
 if __name__ == "__main__":
     main()
