@@ -2931,6 +2931,7 @@ class MainWindow(QMainWindow):
     _quiz_sig       = pyqtSignal(str, object, object)  # (topic, questions, grader)
     _quiz_hide_sig  = pyqtSignal()
     _review_sig     = pyqtSignal(str, str, object, object)  # document review payload
+    _phone_sig      = pyqtSignal()           # phone paired (dashboard thread)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -3090,6 +3091,7 @@ class MainWindow(QMainWindow):
         self._quiz_sig.connect(self._show_quiz)
         self._quiz_hide_sig.connect(self._hide_quiz)
         self._review_sig.connect(self._show_review)
+        self._phone_sig.connect(self.notify_phone_connected)
         self._cam_stop = threading.Event()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
@@ -5191,10 +5193,11 @@ class MainWindow(QMainWindow):
 
     def _on_setup_done(self, key: str, os_name: str):
         os.makedirs(CONFIG_DIR, exist_ok=True)
-        API_FILE.write_text(
-            json.dumps({"gemini_api_key": key, "os_system": os_name}, indent=4),
-            encoding="utf-8",
-        )
+        # Merge, don't replace: this also runs when a rejected key is re-entered,
+        # and every other setting (names, voice, plugins…) lives in the same file.
+        cfg = _read_full_config()
+        cfg.update(gemini_api_key=key, os_system=os_name)
+        API_FILE.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
         self._ready = True
         if self._overlay:
             self._overlay.hide()
@@ -5366,7 +5369,8 @@ class JarvisUI:
             pass
 
     def notify_phone_connected(self) -> None:
-        self._win.notify_phone_connected()
+        """Thread-safe: called from the dashboard's asyncio thread."""
+        self._win._phone_sig.emit()
 
     def set_state(self, state: str):
         self._win._state_sig.emit(state)
