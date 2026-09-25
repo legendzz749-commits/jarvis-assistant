@@ -26,7 +26,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
     QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
-    QPen, QPixmap, QRadialGradient, QShortcut,
+    QPen, QPixmap, QRadialGradient, QShortcut, QTextCharFormat, QTextCursor,
 )
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
@@ -274,7 +274,8 @@ class _SysMetrics:
         if dt > 0:
             sent = (nc.bytes_sent - self._last_net.bytes_sent) / dt
             recv = (nc.bytes_recv - self._last_net.bytes_recv) / dt
-            net  = (sent + recv) / (1024 * 1024)
+            # counters shrink when an interface (VPN, USB tether) disappears
+            net  = max(0.0, (sent + recv) / (1024 * 1024))
         else:
             net = 0.0
         self._last_net   = nc
@@ -1050,15 +1051,29 @@ class LogWidget(QTextEdit):
         if   tl.startswith("you:"):                              self._tag = "you"
         elif tl.startswith(_ai_pfx) or tl.startswith("jarvis:"): self._tag = "ai"
         elif tl.startswith("file:"):                             self._tag = "file"
-        elif "err" in tl:                                        self._tag = "err"
+        elif re.match(r"(err|error)\b", tl):                     self._tag = "err"   # not "Jerry", "Mercedes"
         else:                                                    self._tag = "sys"
         self._tmr.start(6)
+
+    def _append(self, text: str, fmt=None) -> None:
+        """Type at the end through a private cursor: moving the widget's own
+        cursor there on every character wiped the user's selection, and the
+        view jumped to the bottom even while they were reading older lines."""
+        sb = self.verticalScrollBar()
+        at_bottom = sb.value() >= sb.maximum() - 4
+        cur = QTextCursor(self.document())
+        cur.movePosition(QTextCursor.MoveOperation.End)
+        if fmt is None:
+            cur.insertText(text)
+        else:
+            cur.insertText(text, fmt)
+        if at_bottom:
+            sb.setValue(sb.maximum())
 
     def _step(self):
         if self._pos < len(self._text):
             ch  = self._text[self._pos]
-            cur = self.textCursor()
-            fmt = cur.charFormat()
+            fmt = QTextCharFormat()
             col = {
                 "you":  qcol(C.WHITE),
                 "ai":   qcol(C.PRI),
@@ -1072,18 +1087,11 @@ class LogWidget(QTextEdit):
                 "sys":  qcol(C.TEXT_MED),
             }.get(self._tag, qcol(C.TEXT))
             fmt.setForeground(QBrush(col))
-            cur.movePosition(cur.MoveOperation.End)
-            cur.insertText(ch, fmt)
-            self.setTextCursor(cur)
-            self.ensureCursorVisible()
+            self._append(ch, fmt)
             self._pos += 1
         else:
             self._tmr.stop()
-            cur = self.textCursor()
-            cur.movePosition(cur.MoveOperation.End)
-            cur.insertText("\n")
-            self.setTextCursor(cur)
-            self.ensureCursorVisible()
+            self._append("\n")
             QTimer.singleShot(20, self._next)
 
 _FILE_ICONS = {
@@ -3804,6 +3812,9 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(_sec("ACTIVITY LOG"))
         self._log = LogWidget()
+        # Replies are tagged by the assistant's name; a custom name was only
+        # learned on a rename, so after a restart they were coloured as SYS.
+        self._log._ai_name_lc = self._assistant_name.lower()
         lay.addWidget(self._log, stretch=1)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
@@ -5386,11 +5397,7 @@ class JarvisUI:
 
     def glance(self, dx: float, dy: float, hold: float = 1.1) -> None:
         """Ask the avatar to look somewhere for a moment (see HoloAvatar.glance)."""
-        try:
-            if self._avatar is not None:
-                self._avatar.glance(dx, dy, hold)
-        except Exception:
-            pass
+        self._win.hud.glance(dx, dy, hold)
 
     @property
     def ptt_hold(self):

@@ -74,3 +74,42 @@ def test_quiz_and_review_panels_do_not_squash_each_other(jarvis_ui, pump):
     pump(20)
     _hud, content, quiz = win._center_split.sizes()
     assert content > 0 and quiz > 0, win._center_split.sizes()
+
+
+def test_log_colours_replies_by_the_custom_name_and_errors_by_prefix(qapp, config_file, pump):
+    import json
+    import ui
+    config_file.write_text(json.dumps({"gemini_api_key": "k" * 20, "assistant_name": "Friday"}))
+    j = ui.JarvisUI("face.png")
+    try:
+        log = j._win._log
+        for line, tag in (("Friday: done", "ai"), ("SYS: call Jerry back", "sys"),
+                          ("ERR: mic failed", "err")):
+            log._queue = [line]
+            log._next()
+            log._tmr.stop()
+            assert log._tag == tag, line
+    finally:
+        j._win.close()
+
+
+def test_facade_glance_reaches_the_avatar(jarvis_ui, monkeypatch):
+    seen = []
+    monkeypatch.setattr(jarvis_ui._win.hud, "glance", lambda *a: seen.append(a))
+    jarvis_ui.glance(0.0, -0.8)
+    assert seen
+
+
+def test_new_log_lines_do_not_steal_the_users_selection_or_scroll(jarvis_ui, pump):
+    log = jarvis_ui._win._log
+    log.resize(300, 120)
+    for i in range(60):
+        log._append(f"line {i}\n")
+    log.verticalScrollBar().setValue(0)                  # user scrolled up to read
+    cur = log.textCursor()
+    cur.setPosition(0)
+    cur.setPosition(4, cur.MoveMode.KeepAnchor)          # and selected "line"
+    log.setTextCursor(cur)
+    log._append("new line\n")
+    assert log.textCursor().selectedText() == "line"
+    assert log.verticalScrollBar().value() == 0
