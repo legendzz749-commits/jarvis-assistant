@@ -9,6 +9,11 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
+if not __package__:
+    # The daily schedule runs this file as a script, which puts actions/ — not
+    # the project root — on sys.path, so `config` would not be importable.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from config import get_os, is_windows, is_mac, is_linux
 
 _CNW: dict = (
@@ -35,10 +40,8 @@ _KNOWN_APPIDS: dict[str, tuple[str, str]] = {
     "cyberpunk":           ("1091500", "Cyberpunk 2077"),
     "cyberpunk 2077":      ("1091500", "Cyberpunk 2077"),
     "elden ring":          ("1245620", "ELDEN RING"),
-    "minecraft":           ("1672970", "Minecraft Launcher"),
     "apex legends":        ("1172470", "Apex Legends"),
     "apex":                ("1172470", "Apex Legends"),
-    "fortnite":            ("1517990", "Fortnite"),
     "goose goose duck":    ("1568590", "Goose Goose Duck"),
     "among us":            ("945360",  "Among Us"),
     "fall guys":           ("1097150", "Fall Guys"),
@@ -774,7 +777,7 @@ def _update_epic_games(epic_exe: Path, game_name: str = None) -> str:
                 subprocess.Popen([str(epic_exe), url] if epic_exe else ["xdg-open", url])
             else:
                 subprocess.Popen([str(epic_exe), url])
-            return f"Opened Epic for '{matched[0]['name']}'."
+            return f"Launched '{matched[0]['name']}' through Epic — it updates before starting."
         except Exception as e:
             return f"Epic update failed: {e}"
     else:
@@ -790,11 +793,10 @@ def _update_epic_games(epic_exe: Path, game_name: str = None) -> str:
             else:
 
                 if _is_epic_running():
-                    for g in games[:10]:
-                        subprocess.Popen([str(epic_exe),
-                            f"com.epicgames.launcher://apps/{g['id']}?action=launch&silent=true"])
-                        time.sleep(0.5)
-                    return f"Triggered update check for {len(games)} Epic game(s)."
+                    # action=launch would START each game. Opening the library
+                    # makes the running launcher check its installed games.
+                    subprocess.Popen([str(epic_exe),
+                                      "com.epicgames.launcher://store/library"])
                 else:
                     subprocess.Popen([str(epic_exe)])
             count = len(games)
@@ -998,7 +1000,7 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                     is_installed = any(
                         name_lower in g["name"].lower() for g in installed
                     )
-                    if not is_installed:
+                    if not is_installed and action == "install":
                         msg = _install_steam_game(
                             steam_path, game_name=game_name, app_id=app_id
                         )
@@ -1012,6 +1014,8 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                         if player: player.write_log(f"[GameUpdater] {msg[:100]}")
                         if speak:  speak(msg)
                         return msg
+                    elif not is_installed:
+                        results.append(f"Steam: '{game_name}' is not installed.")
                     else:
                         results.append(
                             f"Steam: {_update_steam_games(steam_path, game_name=game_name)}"
