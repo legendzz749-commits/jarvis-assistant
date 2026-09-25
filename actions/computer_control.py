@@ -63,6 +63,7 @@ _SAFE_SCREENSHOT_ROOTS = (
 
 def _safe_screenshot_path(requested: str | None) -> Path:
     fallback = Path.home() / "Desktop" / "jarvis_screenshot.png"
+    fallback.parent.mkdir(parents=True, exist_ok=True)   # accounts without a Desktop folder
     if not requested:
         return fallback
     try:
@@ -149,14 +150,28 @@ def _user_profile() -> dict:
         if _MEMORY_PATH.exists():
             data     = json.loads(_MEMORY_PATH.read_text(encoding="utf-8"))
             identity = data.get("identity", {})
-            return {k: v.get("value", "") for k, v in identity.items()}
+            # older stores kept plain strings; one of those made .get() raise
+            # and every field fall back to the empty profile
+            return {k: (v.get("value", "") if isinstance(v, dict) else str(v))
+                    for k, v in identity.items()}
     except Exception:
         pass
     return {}
 
+def _off_corner(x: int, y: int) -> tuple[int, int]:
+    """Keep the pointer out of the screen corners: pyautogui treats reaching one
+    as its emergency stop and fails every later call."""
+    w, h = pyautogui.size()
+    return min(max(x, 1), w - 2), min(max(y, 1), h - 2)
+
+
 def _type(text: str, interval: float = 0.03) -> str:
     _require_pyautogui()
     time.sleep(0.3)
+    if not text.isascii() and _copy_to_clipboard(text):
+        # pyautogui can only type ASCII; anything else is silently dropped.
+        pyautogui.hotkey("command" if _get_os() == "mac" else "ctrl", "v")
+        return f"Typed: {text[:60]}{'…' if len(text) > 60 else ''}"
     pyautogui.typewrite(text, interval=interval)
     return f"Typed: {text[:60]}{'…' if len(text) > 60 else ''}"
 
@@ -167,7 +182,7 @@ def _smart_type(text: str, clear_first: bool = True) -> str:
         _clear_field()
         time.sleep(0.1)
 
-    if len(text) > 20 and _copy_to_clipboard(text):
+    if (len(text) > 20 or not text.isascii()) and _copy_to_clipboard(text):
         time.sleep(0.1)
         paste_key = "command" if _get_os() == "mac" else "ctrl"
         pyautogui.hotkey(paste_key, "v")
@@ -445,13 +460,15 @@ def computer_control(
             return _click(params.get("x"), params.get("y"), "right", 1)
 
         if action == "move":
-            return _move(int(params.get("x", 0)), int(params.get("y", 0)))
+            if params.get("x") is None or params.get("y") is None:
+                return "move needs both x and y."
+            return _move(*_off_corner(int(params["x"]), int(params["y"])))
 
         if action == "drag":
-            return _drag(
-                int(params.get("x1", 0)), int(params.get("y1", 0)),
-                int(params.get("x2", 0)), int(params.get("y2", 0)),
-            )
+            if any(params.get(k) is None for k in ("x1", "y1", "x2", "y2")):
+                return "drag needs x1, y1, x2 and y2."
+            return _drag(*_off_corner(int(params["x1"]), int(params["y1"])),
+                         *_off_corner(int(params["x2"]), int(params["y2"])))
 
         if action == "hotkey":
             raw  = params.get("keys", "")
@@ -512,8 +529,8 @@ def computer_control(
             profile = _user_profile()
             value   = profile.get(field, "")
             if not value:
-                value = _random_data(field)
-                print(f"[ComputerControl] ⚠️ No '{field}' in memory, using random: {value}")
+                return (f"NOT_IN_MEMORY: I don't have the user's {field} stored. "
+                        f"Ask the user for it — do not make one up.")
             return value
 
         return f"Unknown action: '{action}'"

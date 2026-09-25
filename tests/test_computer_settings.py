@@ -93,3 +93,71 @@ def test_smart_type_falls_back_when_no_clipboard_backend(monkeypatch):
     cc._smart_type("a sentence that is longer than twenty characters", clear_first=False)
 
     assert typed == ["a sentence that is longer than twenty characters"]
+
+
+@pytest.mark.parametrize("text,wrong", [
+    ("restart the browser", "restart"),
+    ("unlock the screen", "lock_screen"),
+    ("kill 3 processes", "volume_set"),
+])
+def test_descriptions_do_not_resolve_to_the_wrong_action(text, wrong):
+    assert cs._detect_action(text)["action"] != wrong
+
+
+def test_volume_number_still_resolves():
+    assert cs._detect_action("set the volume to 30") == {"action": "volume_set", "value": 30}
+
+
+def test_undo_of_mute_restores_the_mute_state(monkeypatch):
+    from core import undo
+    undo.clear()
+    state = {"muted": False}
+    monkeypatch.setattr(cs, "_mute_get", lambda: state["muted"])
+    monkeypatch.setattr(cs, "_set_mute", lambda m: state.__setitem__("muted", m))
+    cs.computer_settings({"action": "mute"})
+    assert state["muted"] is True
+    undo.undo_last()
+    assert state["muted"] is False
+
+
+def test_xrandr_fallback_sets_a_real_value(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **k):
+        calls.append(argv)
+        return types.SimpleNamespace(stdout="HDMI-1 connected primary\n\tBrightness: 0.80\n", returncode=0)
+    monkeypatch.setattr(cs.subprocess, "run", fake_run)
+    cs._xrandr_brightness_step(-0.1)
+    assert calls[-1] == ["xrandr", "--output", "HDMI-1", "--brightness", "0.70"]
+
+
+def test_move_without_coordinates_never_parks_in_the_failsafe_corner(monkeypatch):
+    from actions import computer_control as cc
+    moved = []
+    monkeypatch.setattr(cc, "_move", lambda x, y: moved.append((x, y)) or "moved")
+    monkeypatch.setattr(cc.pyautogui, "size", lambda: (1920, 1080))
+    assert "needs" in cc.computer_control({"action": "move"})
+    cc.computer_control({"action": "move", "x": 0, "y": 0})
+    assert moved == [(1, 1)]
+
+
+def test_user_data_never_invents_values(monkeypatch):
+    from actions import computer_control as cc
+    monkeypatch.setattr(cc, "_user_profile", lambda: {})
+    assert cc.computer_control({"action": "user_data", "field": "email"}).startswith("NOT_IN_MEMORY")
+
+
+def test_non_ascii_text_is_pasted_not_dropped(monkeypatch):
+    from actions import computer_control as cc
+    typed, pasted = [], []
+    monkeypatch.setattr(cc, "_copy_to_clipboard", lambda t: pasted.append(t) or True)
+    monkeypatch.setattr(cc.pyautogui, "typewrite", lambda t, **k: typed.append(t))
+    monkeypatch.setattr(cc.pyautogui, "hotkey", lambda *a: None)
+    monkeypatch.setattr(cc.time, "sleep", lambda _s: None)
+    cc._type("Günaydın")
+    assert pasted == ["Günaydın"] and typed == []
+
+
+@pytest.mark.parametrize("typo,action", [("fullscren", "full_screen"), ("volumeup", "volume_up")])
+def test_typos_still_resolve(typo, action):
+    assert cs.ACTION_MAP[cs._detect_action(typo)["action"]] is cs.ACTION_MAP[action]

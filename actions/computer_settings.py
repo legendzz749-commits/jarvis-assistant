@@ -98,6 +98,21 @@ def _set_mute(muted: bool | None):
         subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", state],
             capture_output=True)
 
+def _mute_get() -> bool | None:
+    """Current mute state, or None where it cannot be read (then no undo)."""
+    try:
+        if _OS == "Windows":
+            return bool(_win_endpoint_volume().GetMute())
+        if _OS == "Darwin":
+            r = subprocess.run(["osascript", "-e", "output muted of (get volume settings)"],
+                               capture_output=True, text=True, timeout=5)
+            return {"true": True, "false": False}.get(r.stdout.strip())
+        r = subprocess.run(["pactl", "get-sink-mute", "@DEFAULT_SINK@"],
+                           capture_output=True, text=True, timeout=5)
+        return {"yes": True, "no": False}.get(r.stdout.split(":")[-1].strip())
+    except Exception:
+        return None
+
 def volume_mute():        _set_mute(True)
 def volume_unmute():      _set_mute(False)
 def volume_toggle_mute(): _set_mute(None)
@@ -206,13 +221,7 @@ def brightness_up():
                 capture_output=True).returncode == 0:
             subprocess.run(["brightnessctl", "set", "+10%"], capture_output=True)
         else:
-            subprocess.run(
-                'xrandr --output $(xrandr | grep " connected" | head -1 | cut -d " " -f1)'
-                ' --brightness $(python3 -c "import subprocess; '
-                'b=float(subprocess.check_output([\"xrandr\",\"--verbose\"]).decode()'
-                '.split(\"Brightness:\")[1].split()[0]); print(min(1.0,b+0.1))")',
-                shell=True, capture_output=True
-            )
+            _xrandr_brightness_step(+0.1)
     else:
         try:
             subprocess.run(
@@ -225,6 +234,20 @@ def brightness_up():
         except Exception as e:
             print(f"[Settings] Brightness up failed on Windows: {e}")
 
+def _xrandr_brightness_step(delta: float) -> None:
+    """Software brightness via xrandr when brightnessctl is missing. (The old
+    one-line shell version nested double quotes inside a python3 -c string,
+    so it never passed a value at all.)"""
+    out = subprocess.run(["xrandr", "--verbose"], capture_output=True, text=True).stdout
+    name = re.search(r"^(\S+) connected", out, re.MULTILINE)
+    level = re.search(r"Brightness:\s*([\d.]+)", out)
+    if not name or not level:
+        raise RuntimeError("xrandr reported no connected output")
+    value = min(1.0, max(0.1, float(level.group(1)) + delta))
+    subprocess.run(["xrandr", "--output", name.group(1), "--brightness", f"{value:.2f}"],
+                   capture_output=True)
+
+
 def brightness_down():
     if _OS == "Darwin":
         subprocess.run(["osascript", "-e",
@@ -235,13 +258,7 @@ def brightness_down():
                 capture_output=True).returncode == 0:
             subprocess.run(["brightnessctl", "set", "10%-"], capture_output=True)
         else:
-            subprocess.run(
-                'xrandr --output $(xrandr | grep " connected" | head -1 | cut -d " " -f1)'
-                ' --brightness $(python3 -c "import subprocess; '
-                'b=float(subprocess.check_output([\"xrandr\",\"--verbose\"]).decode()'
-                '.split(\"Brightness:\")[1].split()[0]); print(max(0.1,b-0.1))")',
-                shell=True, capture_output=True
-            )
+            _xrandr_brightness_step(-0.1)
     else:
         try:
             subprocess.run(
@@ -765,17 +782,25 @@ def _detect_action(description: str) -> dict:
 
     # 2. "set volume to 30", "sesi 30 yap" — a number next to a volume word.
     num = re.search(r"(\d{1,3})\s*%?", low)
-    if num and any(w in low for w in ("volume", "ses", "sound", "lautstark", "громкость")):
+    # whole words: "ses" is inside "processes", "sessions", "addresses"…
+    if num and re.search(r"\b(volume|ses|sesi|sound|lautstärke|lautstarke|громкость)\b", low):
         return {"action": "volume_set", "value": max(0, min(100, int(num.group(1))))}
 
     # 3. Alias phrases.
     for action, phrases in _ALIASES.items():
-        if any(_normalise(p) == norm or p in low for p in phrases):
+        if any(_normalise(p) == norm or re.search(rf"(?<!\w){re.escape(p)}(?!\w)", low)
+               for p in phrases):
             return {"action": action, "value": None}
+
+    # Guessing below must never land on restart/shutdown/wifi: "restart the
+    # browser" is not "restart the computer". Those need their exact name.
+    known -= set(_IRREVERSIBLE)
 
     # 4. Fuzzy match on the action names — catches "fullscren", "volumeup".
     import difflib
-    close = difflib.get_close_matches(norm, sorted(known), n=1, cutoff=0.72)
+    # 0.85: typos ("fullscren" 0.90, "volumeup" 0.94) pass; different requests
+    # that share words ("unlock_the_screen" vs lock_screen, 0.79) do not.
+    close = difflib.get_close_matches(norm, sorted(known), n=1, cutoff=0.85)
     if close:
         return {"action": close[0], "value": None}
 
@@ -896,8 +921,10 @@ def computer_settings(
     # tell us the current value, nothing is registered — an undo that restores
     # a guess is worse than no undo at all.
     _before = None
-    if action in ("volume_up", "volume_down", "mute", "unmute", "toggle_mute"):
+    if action in ("volume_up", "volume_down"):
         _before = ("volume", volume_get())
+    elif action in ("mute", "unmute", "toggle_mute"):
+        _before = ("mute", _mute_get())
     elif action in ("brightness_up", "brightness_down"):
         _before = ("brightness", brightness_get())
 
@@ -913,6 +940,9 @@ def computer_settings(
             if kind == "volume":
                 push_undo(f"volume ({action})",
                           lambda b=old: (volume_set(b), f"Volume back to {b}%.")[1])
+            elif kind == "mute":
+                push_undo(f"sound {action}",
+                          lambda m=old: (_set_mute(m), "Sound " + ("muted" if m else "on") + " again.")[1])
             elif kind == "brightness":
                 push_undo(f"brightness ({action})",
                           lambda b=old: (brightness_set(b), f"Brightness back to {b}%.")[1])
