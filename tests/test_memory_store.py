@@ -91,3 +91,26 @@ def test_popping_the_briefing_summary_consumes_older_ones_too(mem_path):
     mm.save_session_summary("Evening: booked flights.")
     assert mm.pop_last_session()["summary"] == "Evening: booked flights."
     assert mm.pop_last_session() is None
+
+
+def test_facts_in_other_categories_reach_the_prompt(mem_path):
+    memory = {**mm._empty_memory(), "health": {"allergy": {"value": "penicillin", "updated": "2026-03-01"}},
+              "monitors": {"x": {"value": "internal"}}}
+    block = mm.format_memory_for_prompt(memory)
+    assert "penicillin" in block and "internal" not in block
+
+
+def test_saved_category_is_normalised(mem_path):
+    mm.save_memory(mm._empty_memory())
+    mm.remember("ayse", "my sister", "Relationships")
+    mm.remember("allergy", "penicillin", "health")
+    memory = mm.load_memory()
+    assert "ayse" in memory["relationships"] and "allergy" in memory["notes"]
+
+
+def test_prompt_block_stays_bounded_however_much_identity_grows(mem_path):
+    identity = {"name": {"value": "Tony"}}
+    identity.update({f"custom_fact_{i}": {"value": "x" * 90} for i in range(30)})
+    block = mm.format_memory_for_prompt({**mm._empty_memory(), "identity": identity})
+    assert "Tony" in block and "custom fact 29" in block      # overflow is indexed, not lost
+    assert len(block) < mm.PROMPT_CORE_CHARS + mm.PROMPT_INDEX_CHARS + 400

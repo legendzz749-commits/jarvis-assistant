@@ -50,7 +50,7 @@ from google import genai
 from google.genai import types
 from ui import JarvisUI
 from memory.memory_manager import (
-    load_memory, update_memory, format_memory_for_prompt,
+    load_memory, remember, format_memory_for_prompt,
     save_session_summary, pop_last_session,
     search_memory, set_trim_notifier,
 )
@@ -302,21 +302,32 @@ def _load_system_prompt() -> str:
 
 _CTRL_RE = re.compile(r"<ctrl\d+>", re.IGNORECASE)
 
-# Transcript chunks shorter than this may legitimately repeat ("evet, evet"),
-# so only longer ones are treated as duplicates.
+# A re-send is only recognised from a chunk at least this long — shorter ones
+# ("evet, evet", "the") occur by chance.
 _REPEAT_MIN = 12
 
 
-def _is_repeat_chunk(txt: str, buf: list) -> bool:
-    """True if this transcript chunk has already been seen this turn.
+def _resend_offset(txt: str, prev: str, pos) -> int | None:
+    """If this transcript chunk re-sends the previous turn's text, the offset in
+    *prev* just past it; otherwise None.
 
-    Guards against the API re-sending the tail of a response across the several
-    turn_completes a tool-using turn produces.
+    A tool-using answer passes through several turn_completes and the API can
+    re-send the tail of the previous turn at the start of the next. *pos* is None
+    until a re-sent chunk has been found; after that each chunk must continue
+    exactly where the last one ended, so a phrase that merely occurs somewhere
+    earlier is never mistaken for a repeat.
     """
-    if len(txt) < _REPEAT_MIN:
-        return bool(buf) and txt == buf[-1]
-    joined = " ".join(buf)
-    return txt in joined
+    if not txt or not prev:
+        return None
+    if pos is None:
+        if len(txt) < _REPEAT_MIN:
+            return None
+        i = prev.find(txt)
+    else:
+        i = prev.find(txt, pos)
+        if i < 0 or prev[pos:i].strip():
+            return None
+    return None if i < 0 else i + len(txt)
 
 def _clean_transcript(text: str) -> str:    
     text = _CTRL_RE.sub("", text)
@@ -350,7 +361,7 @@ TOOL_DECLARATIONS = [
             "look at camera, analyze my screen, etc. "
             "You have NO visual ability without this tool. "
             "After the image is captured it is sent directly to you — describe what you see and answer the user's question. "
-            "When using camera: the live view stays open until user says close it or calls close_camera."
+            "When using camera: the live preview closes by itself shortly after you answer; call close_camera to close it sooner."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -806,7 +817,9 @@ class JarvisLive:
         session."""
         loop = getattr(self, "_loop", None)
         ev   = self._reconnect_event
-        self._reconnect_keep   = keep_context
+        # Sticky: a voice change followed by a device change before the rebuild
+        # must still start fresh. Reset once the rebuild consumes it.
+        self._reconnect_keep   = self._reconnect_keep and keep_context
         self._reconnect_reason = reason
         if loop and ev is not None:
             loop.call_soon_threadsafe(ev.set)
@@ -836,6 +849,7 @@ class JarvisLive:
         await self._reconnect_event.wait()
         self._reconnect_event.clear()
         keep   = self._reconnect_keep
+        self._reconnect_keep = True
         reason = getattr(self, "_reconnect_reason", "") or "settings"
         self.ui.write_log(
             f"SYS: Applying {reason} — reconnecting"
@@ -1178,8 +1192,8 @@ class JarvisLive:
             key      = args.get("key", "")
             value    = args.get("value", "")
             if key and value:
-                update_memory({category: {key: {"value": value}}})
-                print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
+                # remember() maps "Relationships"/"health" onto the known categories
+                print(f"[Memory] 💾 save_memory: {remember(key, value, category)}")
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -1266,17 +1280,16 @@ class JarvisLive:
 
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
+                # The reply to this result is the goodbye. Asking for a second one
+                # after a network summary, then exiting a fixed 1.5 s later, made
+                # the user hear a goodbye, silence, and half of another.
+                result = "Shutting down now. Say a brief natural goodbye to the user."
                 async def _do_shutdown():
-                    await self._save_session_summary()
-                    if self.session:
-                        try:
-                            await self.session.send_client_content(
-                                turns={"role": "user", "parts": [{"text": "Say a brief natural goodbye to the user."}]},
-                                turn_complete=True,
-                            )
-                        except Exception:
-                            pass
-                    await asyncio.sleep(1.5)
+                    await self._wait_until_spoken()
+                    try:
+                        await asyncio.wait_for(self._save_session_summary(), 10)
+                    except Exception as e:
+                        print(f"[JARVIS] Session summary not saved: {e}")
                     import os as _os
                     _os._exit(0)
                 asyncio.create_task(_do_shutdown())
@@ -1535,6 +1548,7 @@ class JarvisLive:
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
         out_buf, in_buf = [], []
+        resend_pos = -1        # -1: not looking; None: turn start; int: inside a re-sent tail
 
         try:
             while True:
@@ -1574,12 +1588,17 @@ class JarvisLive:
                             txt = _clean_transcript(sc.output_transcription.text)
                             # A turn that involves a tool call passes through
                             # several turn_completes, and the API re-sends the
-                            # tail of the transcript across them. Comparing only
-                            # against the previous chunk missed that — once
-                            # out_buf had been flushed and emptied, the repeat
-                            # sailed straight back in, which logged the answer
-                            # twice AND made the avatar mouth it twice.
-                            if txt and not _is_repeat_chunk(txt, out_buf):
+                            # tail of the previous turn's transcript at the start
+                            # of the next. Only that is dropped (from the log AND
+                            # the mouth); a user who has spoken since starts a
+                            # new exchange, where an identical answer is real.
+                            nxt = None
+                            if txt and resend_pos != -1 and not in_buf:
+                                nxt = _resend_offset(txt, self._last_out_logged, resend_pos)
+                            if nxt is not None:
+                                resend_pos = nxt
+                            elif txt:
+                                resend_pos = -1
                                 out_buf.append(txt)
                                 # Hand the words to the mouth as they arrive, so
                                 # the avatar can form the consonants the audio
@@ -1604,6 +1623,7 @@ class JarvisLive:
                                 self._interrupted = False
                                 in_buf  = []
                                 out_buf = []
+                                resend_pos = -1
                                 self._visemes.reset()
                                 continue
 
@@ -1638,6 +1658,7 @@ class JarvisLive:
                                         "ts": datetime.now().isoformat(),
                                     }))
                             out_buf = []
+                            resend_pos = None
 
                             if self._vision_close_pending:
                                 # This turn_complete IS the vision answer — close camera + release busy flag
@@ -1964,6 +1985,21 @@ class JarvisLive:
 
     # ── Session memory ──────────────────────────────────────────────────────────
 
+    async def _wait_until_spoken(self, start_within: float = 3.0, limit: float = 15.0) -> None:
+        """Wait for the reply now being generated to finish playing — bounded,
+        so a reply that never comes cannot keep JARVIS from exiting."""
+        clock = asyncio.get_running_loop().time
+        t0 = clock()
+
+        def busy():
+            return (self._generating or self._is_speaking
+                    or (self.audio_in_queue is not None and not self.audio_in_queue.empty()))
+        while not busy() and clock() - t0 < start_within:
+            await asyncio.sleep(0.05)
+        while busy() and clock() - t0 < limit:
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.4)          # the last write is still in the device buffer
+
     async def _save_session_summary(self) -> None:
         """Summarise the current session in 1-2 sentences and save to long_term.json."""
         log = self._session_log
@@ -2193,6 +2229,15 @@ class JarvisLive:
             try:
                 print("[JARVIS] Connecting...")
                 self.ui.set_state("THINKING")
+                # Requests made up to here are reflected in the config built
+                # below. One made later — even mid-handshake — stays set and
+                # rebuilds the new session (it used to be cleared after connect,
+                # so a voice picked while connecting was never applied).
+                if self._reconnect_event.is_set():
+                    self._reconnect_event.clear()
+                    if not self._reconnect_keep:
+                        self._resume_handle = None
+                    self._reconnect_keep = True
                 _resumed_with = self._resume_handle is not None
                 config = self._build_config()
 
@@ -2252,7 +2297,6 @@ class JarvisLive:
                     if self._dashboard:
                         await self._dashboard.broadcast({"type": "status", "state": "active"})
 
-                    self._reconnect_event.clear()  # ignore requests from before this session
                     tg.create_task(self._watch_reconnect())
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())

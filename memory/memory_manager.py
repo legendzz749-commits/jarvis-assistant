@@ -233,6 +233,9 @@ _CATEGORY_LABELS = {
 _IDENTITY_FIELDS = ["name", "age", "birthday", "city", "job",
                     "language", "school", "nationality"]
 
+# Top-level keys that hold app state, not facts about the person.
+_NOT_FACTS = {"identity", "monitors", "sessions"}
+
 
 def format_memory_for_prompt(memory: dict | None) -> str:
     """Build the memory block that goes into the system prompt.
@@ -276,16 +279,22 @@ def format_memory_for_prompt(memory: dict | None) -> str:
                 f"always answer in the language of their CURRENT message)")
         else:
             core_lines.append(f"{field.title()}: {val}")
-    for key, entry in identity.items():
-        if key in _IDENTITY_FIELDS:
-            continue
-        val = _entry_value(entry)
-        if val:
-            core_lines.append(f"{_pretty(key).title()}: {val}")
+    # Facts saved under a category of their own ("health", "pets") are shown
+    # and indexed like the labelled ones rather than silently left out.
+    labels = dict(_CATEGORY_LABELS)
+    for cat, entries in memory.items():
+        if (cat not in labels and cat not in _NOT_FACTS
+                and not cat.startswith("_") and isinstance(entries, dict)):
+            labels[cat] = _pretty(cat).title()
 
-    # 2. Everything else, most recently updated first
+    # 2. Everything else, most recently updated first. Identity entries beyond
+    # the standard fields compete for the budget too, ahead of the rest.
     rest: list[tuple[str, str, str, str]] = []   # (updated, cat, key, value)
-    for cat in _CATEGORY_LABELS:
+    for key, entry in identity.items():
+        val = _entry_value(entry)
+        if key not in _IDENTITY_FIELDS and val:
+            rest.append(("9999", "identity", key, val))
+    for cat in labels:
         for key, entry in (memory.get(cat, {}) or {}).items():
             val = _entry_value(entry)
             if not val:
@@ -305,12 +314,20 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     # pure recency systematically buries them.
     per_cat_used: dict[str, int] = {}
     for _updated, cat, key, val in rest:
-        line = f"  - {_pretty(key).title()}: {val}"
-        if (per_cat_used.get(cat, 0) < PROMPT_MAX_PER_CATEGORY
-                and used + len(line) + 1 <= PROMPT_CORE_CHARS):
-            shown.setdefault(cat, []).append(line)
-            per_cat_used[cat] = per_cat_used.get(cat, 0) + 1
-            used += len(line) + 1
+        if cat == "identity":
+            line, cost = f"{_pretty(key).title()}: {val}", 0
+        else:
+            line = f"  - {_pretty(key).title()}: {val}"
+            # the category's blank line and header ride along with its first entry
+            cost = 0 if cat in shown else len(labels[cat]) + 3
+        if ((cat == "identity" or per_cat_used.get(cat, 0) < PROMPT_MAX_PER_CATEGORY)
+                and used + cost + len(line) + 1 <= PROMPT_CORE_CHARS):
+            if cat == "identity":
+                core_lines.append(line)
+            else:
+                shown.setdefault(cat, []).append(line)
+                per_cat_used[cat] = per_cat_used.get(cat, 0) + 1
+            used += cost + len(line) + 1
         else:
             overflow.setdefault(cat, []).append(_pretty(key))
 
@@ -321,7 +338,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     # about — would fall off the end.
     indexed: list[str] = []
     if overflow:
-        cats  = [c for c in _CATEGORY_LABELS if overflow.get(c)]
+        cats  = [c for c in ["identity", *labels] if overflow.get(c)]
         cursor = {c: 0 for c in cats}
         while cats:
             for cat in list(cats):
@@ -332,7 +349,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
                 indexed.append(overflow[cat][i])
                 cursor[cat] = i + 1
 
-    for cat, label in _CATEGORY_LABELS.items():
+    for cat, label in labels.items():
         if shown.get(cat):
             core_lines.append("")
             core_lines.append(f"{label}:")
@@ -455,6 +472,7 @@ def all_entries_for_ui() -> list[dict]:
 
 def remember(key: str, value: str, category: str = "notes") -> str:
     valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes"}
+    category = str(category or "notes").strip().casefold()
     if category not in valid:
         category = "notes"
     update_memory({category: {key: {"value": value}}})

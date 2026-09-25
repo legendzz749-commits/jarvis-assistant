@@ -162,3 +162,110 @@ def test_network_errors_are_recognised_on_every_os():
     assert main._is_network_error(group)
     assert main._is_network_error(socket.gaierror(-2, "Name or service not known"))
     assert not main._is_network_error(ValueError("bad config"))
+
+
+def _run_turns(turns):
+    """Feed transcript turns through _receive_audio; return (log, mouthed)."""
+    import pytest
+    log, mouthed = [], []
+
+    class Done(Exception):
+        pass
+
+    def responses():
+        for chunks, user in turns:
+            for u in user:
+                yield SimpleNamespace(data=None, tool_call=None, server_content=SimpleNamespace(
+                    output_transcription=None, input_transcription=SimpleNamespace(text=u),
+                    turn_complete=False))
+            for c in chunks:
+                yield SimpleNamespace(data=None, tool_call=None, server_content=SimpleNamespace(
+                    output_transcription=SimpleNamespace(text=c), input_transcription=None,
+                    turn_complete=False))
+            yield SimpleNamespace(data=None, tool_call=None, server_content=SimpleNamespace(
+                output_transcription=None, input_transcription=None, turn_complete=True))
+
+    class FakeSession:
+        async def receive(self):
+            for r in responses():
+                yield r
+            raise Done
+
+    live = _live(session=FakeSession(), _last_out_logged="", _session_log=[], _dashboard=None,
+                 _asst_name="JARVIS", _vision_close_pending=False, _last_user_speech=0.0,
+                 _resume_handle=None)
+    live.ui.write_log = log.append
+    live._visemes = SimpleNamespace(reset=lambda: None, feed_text=mouthed.append)
+    with pytest.raises(Done):
+        asyncio.run(live._receive_audio())
+    return log, mouthed
+
+
+def test_a_resent_tail_is_neither_logged_nor_mouthed_twice():
+    log, mouthed = _run_turns([
+        (["Let me check the forecast", "for Izmir."], ["weather in izmir"]),
+        (["check the forecast", "for Izmir.", "It is sunny."], []),   # tail re-sent after the tool
+    ])
+    assert log == ["You: weather in izmir", "JARVIS: Let me check the forecast for Izmir.",
+                   "JARVIS: It is sunny."]
+    assert mouthed == ["Let me check the forecast", "for Izmir.", "It is sunny."]
+
+
+def test_repeated_phrases_inside_an_answer_are_kept():
+    log, mouthed = _run_turns([
+        (["Step one: open the settings panel.", "Then", "Then", "open the settings panel."], ["how"]),
+    ])
+    assert mouthed == ["Step one: open the settings panel.", "Then", "Then", "open the settings panel."]
+    assert log[-1] == "JARVIS: Step one: open the settings panel. Then Then open the settings panel."
+
+
+def test_the_same_answer_to_a_new_question_is_spoken():
+    log, mouthed = _run_turns([
+        (["It is sunny in Izmir today."], ["weather?"]),
+        (["It is sunny in Izmir today."], ["and now?"]),
+    ])
+    assert mouthed == ["It is sunny in Izmir today."] * 2
+    assert log.count("JARVIS: It is sunny in Izmir today.") == 2
+
+
+def test_shutdown_lets_the_goodbye_finish_and_asks_for_it_once(monkeypatch):
+    import os
+    sent, exited = [], []
+
+    class FakeSession:
+        async def send_client_content(self, **k):
+            sent.append(k)
+
+    live = _live(session=FakeSession(), _is_speaking=False, _session_log=[])
+    monkeypatch.setattr(os, "_exit", lambda code: exited.append(asyncio.get_running_loop().time()))
+
+    async def run():
+        clock = asyncio.get_running_loop().time
+        reply = await live._execute_tool(SimpleNamespace(name="shutdown_jarvis", args={}, id="1"))
+        await asyncio.sleep(0.1)
+        live._generating = True                      # the goodbye streams in...
+        await asyncio.sleep(1.9)
+        live._generating = False                     # ...and has finished playing
+        done = clock()
+        while not exited and clock() - done < 3:
+            await asyncio.sleep(0.05)
+        return reply, done
+    reply, done = asyncio.run(run())
+    assert "goodbye" in reply.response["result"].lower() and sent == []
+    assert exited and exited[0] >= done
+
+
+def test_a_fresh_start_request_survives_a_later_keep_request():
+    import pytest
+    live = _live(_reconnect_event=None, _reconnect_keep=True)
+    live.request_reconnect(keep_context=False, reason="voice")
+    live.request_reconnect(keep_context=True, reason="audio device")
+
+    async def fire():
+        live._reconnect_event = asyncio.Event()
+        live._reconnect_event.set()
+        await live._watch_reconnect()
+    with pytest.raises(main._ReconnectSignal) as sig:
+        asyncio.run(fire())
+    assert sig.value.keep_context is False
+    assert live._reconnect_keep is True               # consumed: the next request starts clean
