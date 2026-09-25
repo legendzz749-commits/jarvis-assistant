@@ -56,12 +56,11 @@ def is_ready() -> bool:
         models_dir = Path(openwakeword.__file__).resolve().parent / "resources" / "models"
         if not models_dir.is_dir():
             return False
-        has_wake = (any(models_dir.glob(f"{WAKE_MODEL}*.onnx"))
-                    or any(models_dir.glob(f"{WAKE_MODEL}*.tflite")))
-        has_mel = (any(models_dir.glob("melspectrogram*.onnx"))
-                   or any(models_dir.glob("melspectrogram*.tflite")))
-        has_emb = (any(models_dir.glob("embedding_model*.onnx"))
-                   or any(models_dir.glob("embedding_model*.tflite")))
+        # Only the ONNX files start() actually loads count: .tflite leftovers
+        # from an interrupted download made this "ready" while start() failed.
+        has_wake = any(models_dir.glob(f"{WAKE_MODEL}*.onnx"))
+        has_mel = any(models_dir.glob("melspectrogram*.onnx"))
+        has_emb = any(models_dir.glob("embedding_model*.onnx"))
         return bool(has_wake and has_mel and has_emb)
     except Exception:
         return False

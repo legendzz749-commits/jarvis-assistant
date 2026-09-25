@@ -120,6 +120,8 @@ _DIGRAPH = {
     "qu": "K",
 }
 
+_GREEK_DIGRAPH = {"ου": "U", "αι": "E", "ει": "I", "οι": "I", "υι": "I"}
+
 _PAUSE = set(".,;:!?…\n")
 
 
@@ -182,6 +184,14 @@ def text_to_visemes(text: str) -> list[tuple[str, float]]:
             i += 1
             continue
 
+        # Greek vowel digraphs say one sound; reduced letter by letter "ου" (/u/)
+        # became O then spread I, the opposite lip shape.
+        if s[i:i + 2] in _GREEK_DIGRAPH:
+            v = _GREEK_DIGRAPH[s[i:i + 2]]
+            i += 2
+            if not (out and out[-1][0] == v):
+                out.append((v, 1.0))
+            continue
         # Digraphs are an orthographic quirk of Latin spelling; check them on
         # the reduced letters so "SCH"/"Sch" and accented forms match too.
         two = to_latin(ch) + (to_latin(s[i + 1]) if i + 1 < n else "")

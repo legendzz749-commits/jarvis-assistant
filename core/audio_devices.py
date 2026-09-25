@@ -406,8 +406,11 @@ def resolve(name: str, kind: str):
                     if _usable(idx, kind):
                         return idx
                     continue
-                if partial is None and (dev_name.startswith(wanted[:24])
-                                        or wanted.startswith(dev_name[:24])):
+                # One name must be a whole prefix of the other (MME cuts at 31
+                # characters). Comparing only 24 characters picked "Speakers
+                # (Realtek High Definition Audio)" for "…(Realtek USB Audio)".
+                if partial is None and dev_name and (dev_name.startswith(wanted)
+                                                     or wanted.startswith(dev_name)):
                     if _usable(idx, kind):
                         partial = idx
             if partial is not None:

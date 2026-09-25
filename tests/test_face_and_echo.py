@@ -38,3 +38,39 @@ def test_mouth_is_not_held_shut_after_the_transcript_runs_out():
     loud = [(0.9, 0.8, 0.0)] * 200                      # (level, open, wide) — loud speech
     out = vs.frames(loud, 0.02)
     assert max(o for _lvl, o, _w in out[-20:]) > 0.3
+
+
+def test_greek_ou_is_a_rounded_u():
+    shapes = [v for v, _w in viseme.text_to_visemes("ουρανός")]
+    assert shapes[0] == "U"
+
+
+def test_confirmation_banner_is_removed_when_it_expires(monkeypatch):
+    from core import confirm
+    hidden = []
+    monkeypatch.setattr(confirm, "TIMEOUT_SECONDS", 0.1)
+    confirm.bind(lambda t, d: None, lambda: hidden.append(1))
+    try:
+        confirm.request("x", "Shut down", "", lambda: "done")
+        import time
+        time.sleep(0.4)
+        assert hidden and confirm.pending_title() in ("", None)
+    finally:
+        monkeypatch.setattr(confirm, "_show_cb", None)
+
+
+def test_saved_device_does_not_match_a_different_long_name(monkeypatch):
+    import sounddevice as sd
+    from core import audio_devices as ad
+    devices = [{"name": "Microphone", "max_input_channels": 1, "max_output_channels": 0, "hostapi": 0},
+               # both share the first 24 characters "Speakers (2- Realtek USB"
+               {"name": "Speakers (2- Realtek USB Headset Earphone)"[:31], "max_input_channels": 0,
+                "max_output_channels": 2, "hostapi": 0},
+               {"name": "Speakers (2- Realtek USB Audio Device)"[:31], "max_input_channels": 0,
+                "max_output_channels": 2, "hostapi": 0}]
+    monkeypatch.setattr(sd, "query_devices", lambda *a, **k: devices)
+    monkeypatch.setattr(sd, "query_hostapis", lambda *a, **k: [{"name": "MME"}])
+    monkeypatch.setattr(ad, "list_devices", lambda kind: [])
+    monkeypatch.setattr(ad, "_usable", lambda idx, kind: True)
+    # saved from DirectSound with its full name; MME shows it cut to 31 characters
+    assert ad.resolve("Speakers (2- Realtek USB Audio Device)", "output") == 2

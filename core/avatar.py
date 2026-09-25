@@ -667,7 +667,9 @@ class HoloAvatar:
             if vis > 0.35:
                 br = poly.boundingRect()
                 gx = br.center().x() + self._gaze[0] * br.width() * 0.16
-                gy = br.center().y() + self._gaze[1] * br.height() * 0.20
+                # gaze y is "up" positive (asleep looks down at -0.25, a glance
+                # at the panel below is -0.85); screen y grows downward.
+                gy = br.center().y() - self._gaze[1] * br.height() * 0.20
                 cpt = QPointF(gx, gy)
                 rad = min(br.height() * 0.62, br.width() * 0.20)
                 p.setPen(Qt.PenStyle.NoPen)
