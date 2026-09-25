@@ -35,6 +35,12 @@ def _get_model(model_name: str = gemini.SMART):
         def generate_content(self, contents):
             resp = gemini.call(contents, tier=model_name, timeout_ms=60000)
             if resp is None:
+                # gemini.call swallows the 429 itself; every rung cooling down
+                # is how a quota failure shows up here, and the back-off and
+                # "rate limit" messages below depend on recognising it.
+                ladder = gemini._LADDERS.get(model_name, ())
+                if ladder and all(gemini._cooling(m) for m in ladder):
+                    raise RuntimeError("429 RESOURCE_EXHAUSTED: every model is cooling down")
                 raise RuntimeError("every Gemini model on the ladder failed")
             return resp
 
@@ -46,6 +52,30 @@ def _strip_fences(text: str) -> str:
     text = re.sub(r"^```[a-zA-Z]*\r?\n?", "", text)
     text = re.sub(r"\r?\n?```\s*$", "", text)
     return text.strip()
+
+
+def _topological(files: list[dict]) -> list[dict]:
+    """Files after the project files they import, keeping the planner's order
+    otherwise (a cycle leaves the remaining files in that order)."""
+    # "utils/helpers.py" is imported as "utils.helpers"
+    by_module = {str(Path(f.get("path", "")).with_suffix("")).replace("\\", "/").replace("/", "."): f
+                 for f in files}
+    done, out = set(), []
+
+    def visit(f, stack=()):
+        key = f.get("path", "")
+        if key in done or key in stack:
+            return
+        for imp in f.get("imports", []):
+            dep = by_module.get(str(imp))
+            if dep is not None and dep is not f:
+                visit(dep, stack + (key,))
+        done.add(key)
+        out.append(f)
+
+    for f in files:
+        visit(f)
+    return out
 
 
 def _is_rate_limit(error: Exception) -> bool:
@@ -519,10 +549,10 @@ def _build_project(
 
     log(f"Project: {proj_name} | Files: {len(files)} | Entry: {entry_point}")
 
-    def _dep_sort_key(fi: dict) -> int:
-        return len(fi.get("imports", []))
-
-    sorted_files = sorted(files, key=_dep_sort_key)
+    # The planner is told to list files in dependency order, so each file is
+    # written with the code of what it imports already in hand. Re-sorting by
+    # import count broke that; only a real dependency sort may reorder it.
+    sorted_files = _topological(files)
 
     file_codes: dict[str, str] = {}
 

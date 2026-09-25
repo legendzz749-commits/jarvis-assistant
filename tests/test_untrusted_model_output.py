@@ -98,3 +98,21 @@ def test_open_vscode_passes_the_project_without_a_shell(tmp_path, monkeypatch):
     monkeypatch.setattr(dev_agent.time, "sleep", lambda _s: None)
     assert dev_agent._open_vscode(tmp_path)
     assert launched == [(["/usr/bin/code", str(tmp_path)], None)]
+
+
+def test_files_are_written_after_the_modules_they_import():
+    files = [{"path": "main.py", "imports": ["core.engine"]},
+             {"path": "core/engine.py", "imports": ["utils.helpers"]},
+             {"path": "utils/helpers.py", "imports": []},
+             {"path": "README.md", "imports": []}]
+    order = [f["path"] for f in dev_agent._topological(files)]
+    assert order.index("utils/helpers.py") < order.index("core/engine.py") < order.index("main.py")
+
+
+def test_quota_exhaustion_is_recognised_as_a_rate_limit(monkeypatch):
+    from core import gemini
+    monkeypatch.setattr(gemini, "call", lambda *a, **k: None)
+    monkeypatch.setattr(gemini, "_cooling", lambda m: True)
+    with pytest.raises(RuntimeError) as err:
+        dev_agent._get_model().generate_content("plan")
+    assert dev_agent._is_rate_limit(err.value)
