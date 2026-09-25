@@ -5,6 +5,7 @@ import math
 import os
 import platform
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -37,6 +38,14 @@ try:
     from core.avatar import HoloAvatar
 except Exception:      # pragma: no cover — HUD must never die over cosmetics
     HoloAvatar = None
+
+
+def _desktop_exec(*args) -> str:
+    """An Exec= value per the Desktop Entry spec: each argument double-quoted
+    with \\ " ` $ escaped, and % doubled (it introduces field codes)."""
+    def q(a) -> str:
+        return '"' + re.sub(r'(["`$\\])', r'\\\1', str(a)) + '"'
+    return " ".join(q(a) for a in args).replace("%", "%%")
 
 
 def _base_dir() -> Path:
@@ -115,11 +124,7 @@ def apply_ui_accent(accent_hex: str) -> bool:
     import colorsys
 
     accent_hex = (accent_hex or "").strip().lower()
-    if not (accent_hex.startswith("#") and len(accent_hex) == 7):
-        return False
-    try:
-        int(accent_hex[1:], 16)
-    except ValueError:
+    if not re.fullmatch(r"#[0-9a-f]{6}", accent_hex):
         return False
 
     def _hsv(h: str) -> tuple[float, float, float]:
@@ -201,7 +206,8 @@ def _nvml_gpu_windows() -> float:
             for dll_name in ("nvml", r"C:\Windows\System32\nvml.dll"):
                 try:
                     lib = ctypes.WinDLL(dll_name)
-                    lib.nvmlInit_v2()
+                    if lib.nvmlInit_v2() != 0:
+                        continue
                     _nvml_lib = lib
                     break
                 except Exception:
@@ -215,9 +221,10 @@ def _nvml_gpu_windows() -> float:
             return float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
 
         dev = ctypes.c_void_p()
-        _nvml_lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev))
         util = _Util()
-        _nvml_lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(util))
+        if (_nvml_lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev)) != 0
+                or _nvml_lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(util)) != 0):
+            raise OSError("NVML query failed")
         _nvml_ok = True
         return float(util.gpu)
     except Exception:
@@ -321,14 +328,16 @@ class _SysMetrics:
             if self._nv_unix is None:
                 _lib = "libnvidia-ml.so.1" if _OS == "Linux" else "libnvidia-ml.dylib"
                 nv = ctypes.CDLL(_lib)
-                nv.nvmlInit_v2()
                 dev = ctypes.c_void_p()
-                nv.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev))
+                # NVML returns a status code (0 = success) instead of raising
+                if nv.nvmlInit_v2() != 0 or nv.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev)) != 0:
+                    raise OSError("NVML unavailable")
                 self._nv_unix = (nv, dev)
 
             nv, dev = self._nv_unix
             u = _Util()
-            nv.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(u))
+            if nv.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(u)) != 0:
+                return -1.0
             return float(u.gpu)
         except Exception:
             pass
@@ -3528,7 +3537,7 @@ class MainWindow(QMainWindow):
                 desk.write_text(
                     "[Desktop Entry]\n"
                     "Name=J.A.R.V.I.S\n"
-                    f"Exec={python} {script}\n"
+                    f"Exec={_desktop_exec(python, script)}\n"
                     f"Path={script.parent}\n"
                     "Type=Application\n"
                     "Terminal=false\n"
@@ -4086,6 +4095,7 @@ class MainWindow(QMainWindow):
         hdr.addWidget(dot)
 
         self._content_title_lbl = QLabel("BRIEFING")
+        self._content_title_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._content_title_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
         self._content_title_lbl.setStyleSheet(
             f"color: {C.PRI}; background: transparent; letter-spacing: 1px;"
@@ -4299,6 +4309,7 @@ class MainWindow(QMainWindow):
         hdr.addWidget(dot)
 
         self._quiz_title_lbl = QLabel("QUIZ")
+        self._quiz_title_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._quiz_title_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
         self._quiz_title_lbl.setStyleSheet(
             f"color: {C.PRI}; background: transparent; letter-spacing: 1px;")
@@ -4330,6 +4341,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(rule)
 
         self._quiz_q_lbl = QLabel("")
+        self._quiz_q_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._quiz_q_lbl.setWordWrap(True)
         self._quiz_q_lbl.setFont(QFont("Courier New", 9))
         self._quiz_q_lbl.setStyleSheet(f"color: {C.WHITE}; background: transparent;")
@@ -4343,6 +4355,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._quiz_answers)
 
         self._quiz_note_lbl = QLabel("")
+        self._quiz_note_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._quiz_note_lbl.setWordWrap(True)
         self._quiz_note_lbl.setFont(QFont("Courier New", 8))
         self._quiz_note_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
@@ -4634,19 +4647,12 @@ class MainWindow(QMainWindow):
                 if currently_on:
                     plist.unlink(missing_ok=True)
                 else:
-                    plist.write_text(
-                        '<?xml version="1.0" encoding="UTF-8"?>\n'
-                        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-                        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-                        '<plist version="1.0"><dict>\n'
-                        '  <key>Label</key><string>com.jarvis.assistant</string>\n'
-                        '  <key>ProgramArguments</key><array>\n'
-                        f'    <string>{sys.executable}</string>\n'
-                        f'    <string>{script}</string>\n'
-                        '  </array>\n'
-                        '  <key>RunAtLoad</key><true/>\n'
-                        '</dict></plist>\n'
-                    )
+                    import plistlib   # escapes &, < and > in paths, unlike an f-string
+                    plist.write_bytes(plistlib.dumps({
+                        "Label": "com.jarvis.assistant",
+                        "ProgramArguments": [sys.executable, str(script)],
+                        "RunAtLoad": True,
+                    }))
             else:
                 desk_dir = Path.home() / ".config" / "autostart"
                 desk_dir.mkdir(parents=True, exist_ok=True)
@@ -4657,7 +4663,7 @@ class MainWindow(QMainWindow):
                     desk.write_text(
                         "[Desktop Entry]\n"
                         f"Name={self._assistant_name}\n"
-                        f"Exec={sys.executable} {script}\n"
+                        f"Exec={_desktop_exec(sys.executable, script)}\n"
                         "Type=Application\nTerminal=false\n"
                         "X-GNOME-Autostart-enabled=true\n"
                     )
@@ -4853,7 +4859,9 @@ class MainWindow(QMainWindow):
 
         self._ptt_release = QTimer(self)
         self._ptt_release.setSingleShot(True)
-        self._ptt_release.setInterval(420)
+        # Longer than the OS key-repeat delay (commonly 500-660 ms): a shorter
+        # hold cut the mic between the first press and the first repeat.
+        self._ptt_release.setInterval(800)
         self._ptt_release.timeout.connect(lambda: self._ptt_hold(False))
 
         def _press():
@@ -5108,8 +5116,21 @@ class MainWindow(QMainWindow):
 
     # ── Clipboard intelligence ───────────────────────────────────────────────────
 
+    # Password managers (KeePassXC, 1Password, Bitwarden, Windows) tag secrets so
+    # clipboard viewers skip them; showing them on the HUD put passwords on screen.
+    _CONCEALED_FORMATS = (
+        "x-kde-passwordManagerHint",
+        "org.nspasteboard.ConcealedType",
+        "org.nspasteboard.TransientType",
+        'application/x-qt-windows-mime;value="ExcludeClipboardContentFromMonitorProcessing"',
+        'application/x-qt-windows-mime;value="Clipboard Viewer Ignore"',
+    )
+
     def _on_clipboard_changed(self):
         try:
+            mime = QApplication.clipboard().mimeData()
+            if mime is not None and any(mime.hasFormat(f) for f in self._CONCEALED_FORMATS):
+                return
             text = QApplication.clipboard().text().strip()
             if len(text) >= 10:
                 self._clipboard_sig.emit(text)
@@ -5225,8 +5246,18 @@ class _RootShim:
         pass
 
 
+def _log_slot_exception(exc_type, exc, tb):
+    """PyQt6 calls qFatal() — killing the whole app — when a slot raises and no
+    sys.excepthook is installed. A bad payload or an edge case in one panel
+    must cost that action, not the assistant."""
+    import traceback
+    traceback.print_exception(exc_type, exc, tb)
+
+
 class JarvisUI:
     def __init__(self, face_path: str, size=None):
+        if sys.excepthook is sys.__excepthook__:
+            sys.excepthook = _log_slot_exception
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
         self._win = MainWindow(face_path)
