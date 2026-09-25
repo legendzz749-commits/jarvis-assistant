@@ -54,9 +54,10 @@ def _load_config() -> dict:
 
 def _save_config_key(key: str, value) -> None:
     try:
-        cfg = _load_config()
-        cfg[key] = value
-        _CONFIG_PATH.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
+        # The shared writer keeps every other setting (it used to rewrite the
+        # file from whatever it could read — {} on any error).
+        from memory.config_manager import _patch_config
+        _patch_config(**{key: value})
     except Exception as e:
         print(f"[Vision] ⚠️  Could not save config key '{key}': {e}")
 
@@ -139,8 +140,9 @@ def _detect_camera_index() -> int:
             return idx
         print(f"[Vision] ⚠️  Camera index {idx}: no usable frame")
 
+    # Not cached: saving 0 here meant detection never ran again, even after a
+    # camera was plugged in.
     print("[Vision] ⚠️  No camera found — defaulting to index 0")
-    _save_config_key("camera_index", 0)
     return 0
 
 

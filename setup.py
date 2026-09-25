@@ -12,12 +12,24 @@ Two things it deliberately does NOT install:
   * anything for the avatar — the holographic head renders in software on the
     PyQt6 and numpy already listed here. No GPU, no OpenGL, no extra packages.
 """
+# Annotations stay unevaluated, so an old Python reaches _check_python()'s
+# sentence instead of dying on `list[str]` at the first def.
+from __future__ import annotations
+
 import platform
 import subprocess
 import sys
 from pathlib import Path
 
 OS = platform.system()  # "Windows" | "Darwin" | "Linux"
+
+# The messages below use emoji; a cp1252/cp932 console or a redirected pipe on
+# Windows would raise UnicodeEncodeError on the first print.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 HERE = Path(__file__).resolve().parent
 
 MIN_PY = (3, 11)        # hard floor: below this the syntax used here won't parse
@@ -66,14 +78,51 @@ def _check_assets() -> None:
         )
 
 
+def _check_linux_libraries() -> None:
+    """System libraries pip cannot install. Without them the window opens but
+    the assistant never starts, so name them up front."""
+    import ctypes.util
+    missing = []
+    try:
+        import tkinter  # noqa: F401 — pyautogui exits on import without it
+    except ImportError:
+        missing.append("Tk for Python")
+    if not ctypes.util.find_library("portaudio"):
+        missing.append("PortAudio (microphone/speakers)")
+    if not ctypes.util.find_library("xcb-cursor"):
+        missing.append("xcb-cursor (Qt 6.5+ window support)")
+    if missing:
+        print("\n❌ Missing system libraries: " + ", ".join(missing) + ". Install them with:\n"
+              "    Debian/Ubuntu: sudo apt install python3-tk libportaudio2 libxcb-cursor0\n"
+              "    Fedora:        sudo dnf install python3-tkinter portaudio xcb-util-cursor\n"
+              "    Arch:          sudo pacman -S tk portaudio xcb-util-cursor")
+
+
+def _check_environment() -> None:
+    """Ubuntu 23.04+, Debian 12+ and Homebrew mark their Python as externally
+    managed, and pip refuses to install into it — say so instead of dying with a
+    CalledProcessError traceback."""
+    import sysconfig
+    in_venv = sys.prefix != sys.base_prefix
+    marker = Path(sysconfig.get_path("stdlib")) / "EXTERNALLY-MANAGED"
+    if not in_venv and marker.exists():
+        print("\n❌ This Python is managed by your OS, so pip cannot install into it.")
+        print("   Create a virtual environment first, then run setup with it:")
+        print(f"     {sys.executable} -m venv .venv")
+        print("     source .venv/bin/activate      (Windows: .venv\\Scripts\\activate)")
+        print("     python setup.py")
+        sys.exit(1)
+
+
 def main() -> None:
     print(f"⚙  MARK LIV setup — detected OS: {OS or 'unknown'}, "
           f"Python {sys.version_info[0]}.{sys.version_info[1]}")
     _check_python()
+    _check_environment()
 
     # requirements.txt filters OS-specific extras by itself via pip markers.
     _run("Installing Python dependencies (OS-specific extras auto-filtered)…",
-         [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+         [sys.executable, "-m", "pip", "install", "-r", str(HERE / "requirements.txt")])
 
     # Chromium covers Chrome/Edge/Opera/Brave/Vivaldi; Firefox for Firefox.
     # (Safari automation additionally needs: python -m playwright install webkit)
@@ -93,17 +142,19 @@ def main() -> None:
 
     # ── OS-specific post-install notes ────────────────────────────────────────
     if OS == "Windows":
-        try:
-            import win32com.client  # noqa: F401
-        except ImportError:
-            postinstall = Path(sys.executable).parent / "Scripts" / "pywin32_postinstall.py"
+        # A fresh interpreter: pywin32's .pth file is only read at start-up, so
+        # importing it in this process fails on every first install.
+        check = subprocess.run([sys.executable, "-c", "import win32com.client"],
+                               capture_output=True)
+        if check.returncode != 0:
             print(
                 "\n⚠️  pywin32 did not register correctly — desktop-shortcut "
                 "creation will use a slower fallback. To fix it, run:\n"
                 f'    "{sys.executable}" -m pip install --force-reinstall pywin32\n'
-                f'    "{sys.executable}" "{postinstall}" -install'
+                f'    "{sys.executable}" -m pywin32_postinstall -install'
             )
     elif OS == "Linux":
+        _check_linux_libraries()
         print(
             "\nℹ️  Linux note — a few voice-controlled OS actions shell out to "
             "native tools. Install the ones you'll use via your package manager:\n"
@@ -126,4 +177,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # pip treats a setup.py in the project root as a package build script:
+    # `pip install .` would run this whole installer (and a ~300 MB browser
+    # download) inside pip's build, then fail anyway. It takes no arguments.
+    if len(sys.argv) > 1:
+        sys.exit("This is MARK LIV's installer, not a Python package. Run it with no "
+                 "arguments — python setup.py — or use: pip install -r requirements.txt")
     main()

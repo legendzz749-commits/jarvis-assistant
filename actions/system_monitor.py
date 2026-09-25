@@ -48,7 +48,8 @@ def _nvml_gpu() -> float:
             for name in candidates:
                 try:
                     lib = _load(name)
-                    lib.nvmlInit_v2()
+                    if lib.nvmlInit_v2() != 0:      # 0 == NVML_SUCCESS
+                        continue
                     _nvml_lib = lib
                     break
                 except Exception:
@@ -59,9 +60,12 @@ def _nvml_gpu() -> float:
             return -1.0
 
         dev = ctypes.c_void_p()
-        _nvml_lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev))
         u = _Util()
-        _nvml_lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(u))
+        # A failed call leaves the struct zeroed, which read as a real 0 % GPU.
+        if (_nvml_lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev)) != 0
+                or _nvml_lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(u)) != 0):
+            _nvml_ok = False
+            return -1.0
         _nvml_ok = True
         return float(u.gpu)
     except Exception:
@@ -99,11 +103,18 @@ def _get_cpu_temp() -> float:
     # Windows: wmi module (pure Python COM, zero subprocess)
     if _OS == "Windows":
         try:
+            import pythoncom  # type: ignore
             import wmi  # type: ignore
-            w = wmi.WMI(namespace="root/wmi")
-            tz = w.MSAcpi_ThermalZoneTemperature()
-            if tz:
-                return (tz[0].CurrentTemperature / 10.0) - 273.15
+            # Runs on executor threads, where COM has not been initialised —
+            # without this every WMI call failed and the alert never fired.
+            pythoncom.CoInitialize()
+            try:
+                w = wmi.WMI(namespace="root/wmi")
+                tz = w.MSAcpi_ThermalZoneTemperature()
+                if tz:
+                    return (tz[0].CurrentTemperature / 10.0) - 273.15
+            finally:
+                pythoncom.CoUninitialize()
         except Exception:
             pass
 
@@ -151,9 +162,21 @@ class SystemMonitor:
     def _record(self, key: str):
         self._last_alert[key] = time.monotonic()
 
+    def _cpu_since_last(self) -> float:
+        """CPU % since the previous check. psutil's cpu_percent(interval=None)
+        keeps its baseline per thread, and check() runs on whichever executor
+        thread is free — so it compared against the wrong baseline or none."""
+        now = psutil.cpu_times()
+        prev, self._cpu_times = getattr(self, "_cpu_times", None), now
+        if prev is None:
+            return 0.0
+        busy = sum(now) - now.idle - (sum(prev) - prev.idle)
+        total = sum(now) - sum(prev)
+        return 100.0 * busy / total if total > 0 else 0.0
+
     def check(self) -> str | None:
         try:
-            cpu  = psutil.cpu_percent(interval=None)
+            cpu  = self._cpu_since_last()
             ram  = psutil.virtual_memory().percent
             temp = _get_cpu_temp()
             gpu  = _get_gpu_usage()

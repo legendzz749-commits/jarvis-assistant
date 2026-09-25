@@ -2,6 +2,8 @@ import subprocess
 import sys
 import json
 import re
+import shlex
+import tempfile
 import time
 from pathlib import Path
 
@@ -19,6 +21,8 @@ MAX_BUILD_ATTEMPTS = 3
 # fallback ladder. Writing a model name here is what left this file hanging
 # forever whenever that one alias was unwell.
 from core import gemini
+from core.undo import push_undo
+from actions.file_controller import _UNDO_CONTENT_LIMIT, _undo_write
 
 
 def _get_api_key() -> str:
@@ -57,7 +61,7 @@ def _resolve_save_path(output_path: str, language: str) -> Path:
         "sql": ".sql", "json": ".json", "rust": ".rs", "go": ".go",
     }
     if output_path:
-        p = Path(output_path)
+        p = Path(output_path).expanduser()      # "~/x.py" was Desktop/~/x.py
         return p if p.is_absolute() else DESKTOP / p
     ext = ext_map.get((language or "python").lower(), ".py")
     return DESKTOP / f"jarvis_code{ext}"
@@ -66,7 +70,7 @@ def _resolve_save_path(output_path: str, language: str) -> Path:
 def _read_file(file_path: str) -> tuple[str, str]:
     if not file_path:
         return "", "No file path provided."
-    p = Path(file_path)
+    p = Path(file_path).expanduser()
     if not p.exists():
         return "", f"File not found: {file_path}"
     try:
@@ -78,7 +82,16 @@ def _read_file(file_path: str) -> tuple[str, str]:
 def _save_file(path: Path, content: str) -> str:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Same undo contract as file_controller: snapshot the old bytes first.
+        previous, undoable = None, True
+        if path.exists():
+            if path.stat().st_size > _UNDO_CONTENT_LIMIT:
+                undoable = False
+            else:
+                previous = path.read_bytes()
         path.write_text(content, encoding="utf-8")
+        if undoable:
+            push_undo(f"wrote to {path.name}", _undo_write(path, previous))
         return f"Saved to: {path}"
     except Exception as e:
         return f"Could not save: {e}"
@@ -92,15 +105,18 @@ def _preview(code: str, lines: int = 10) -> str:
 
 
 def _has_error(output: str) -> bool:
-    error_signals = ["error", "exception", "traceback", "syntaxerror",
-                     "nameerror", "typeerror", "stderr", "failed", "crash"]
-    return any(s in output.lower() for s in error_signals)
+    """Judged from the exit status _run_file reports, not from words in the
+    output: a program printing "0 errors" did not fail, and a silent crash did."""
+    return output.startswith(("Exit code", "No interpreter", "Interpreter not found",
+                              "Execution error"))
 
 
 def _take_screenshot() -> Path | None:
     try:
         import pyautogui
-        screenshot_path = Path.home() / "Desktop" / f"jarvis_debug_{int(time.time())}.png"
+        # A temp file, not the Desktop: it is deleted after analysis, and a
+        # failed analysis must not leave full-screen captures lying around.
+        screenshot_path = Path(tempfile.gettempdir()) / f"jarvis_debug_{int(time.time())}.png"
         screenshot = pyautogui.screenshot()
         screenshot.save(str(screenshot_path))
         print(f"[Code] 📸 Screenshot: {screenshot_path}")
@@ -184,7 +200,9 @@ Code:"""
     response = model.generate_content(prompt)
     code     = _clean_code(response.text)
     path     = _resolve_save_path(output_path, lang)
-    _save_file(path, code)
+    status   = _save_file(path, code)
+    if not status.startswith("Saved"):
+        raise RuntimeError(status)
     return code, path
 
 
@@ -208,7 +226,7 @@ Fixed code:"""
     return _clean_code(response.text)
 
 
-def _run_file(path: Path, args: list, timeout: int) -> str:
+def _run_file(path: Path, args, timeout: int) -> str:
     interpreters = {
         ".py":  [sys.executable],
         ".js":  ["node"],
@@ -221,6 +239,8 @@ def _run_file(path: Path, args: list, timeout: int) -> str:
     interp = interpreters.get(path.suffix.lower())
     if not interp:
         return f"No interpreter for {path.suffix}."
+    if isinstance(args, str):          # the tool declares args as a STRING
+        args = shlex.split(args)
 
     try:
         result = subprocess.run(
@@ -232,6 +252,8 @@ def _run_file(path: Path, args: list, timeout: int) -> str:
         output = result.stdout.strip()
         error  = result.stderr.strip()
         parts  = []
+        if result.returncode != 0:
+            parts.append(f"Exit code {result.returncode}")
         if output: parts.append(f"Output:\n{output}")
         if error:  parts.append(f"Stderr:\n{error}")
         return "\n\n".join(parts) if parts else "Executed with no output."
@@ -244,8 +266,9 @@ def _run_file(path: Path, args: list, timeout: int) -> str:
         return f"Execution error: {e}"
 
 
-def _build(description, language, output_path, args, timeout, speak=None, player=None) -> str:
-    if not description:
+def _build(description, language, output_path, args, timeout, speak=None, player=None,
+           file_path: str = "") -> str:
+    if not description and not file_path:
         return "Please describe what you want me to build, sir."
 
     if player:
@@ -254,7 +277,19 @@ def _build(description, language, output_path, args, timeout, speak=None, player
     lang = language or "python"
 
     try:
-        code, path = _write(description, lang, output_path, player)
+        if file_path:
+            # "Make my script work": iterate on a copy beside it (so relative
+            # imports still resolve) and never overwrite the original.
+            code, err = _read_file(file_path)
+            if err:
+                return err
+            src  = Path(file_path).expanduser()
+            path = (_resolve_save_path(output_path, lang) if output_path
+                    else src.with_name(f"{src.stem}.fixed{src.suffix}"))
+            _save_file(path, code)
+            description = description or f"{src.name} should run without errors."
+        else:
+            code, path = _write(description, lang, output_path, player)
         print(f"[Code] ✅ Written: {path}")
     except Exception as e:
         msg = f"Could not write initial code: {e}"
@@ -387,12 +422,21 @@ def _run_action(file_path, args, timeout, player) -> str:
 
 def _optimize_action(file_path, code, language, output_path, player) -> str:
 
-    if file_path and not code:
+    # A snippet passed alongside a file_path is not that file: writing its
+    # optimized version over the file would replace the whole file with it.
+    from_file = bool(file_path and not code)
+    if from_file:
         code, err = _read_file(file_path)
         if err:
             return err
     if not code:
         return "Please provide code or a file path to optimize, sir."
+    if len(code) > 6000:
+        # Only the first 6000 characters fit in the prompt; writing the reply
+        # back would silently delete everything after that point.
+        return ("That code is too long to optimize in one pass (over 6000 "
+                "characters) — the rest of the file would be lost. Point me at "
+                "a smaller file or a single function, sir.")
 
     if player:
         player.write_log("[Code] Optimizing code...")
@@ -421,7 +465,7 @@ Optimized code:"""
         return f"Could not optimize code: {e}"
 
     # Kaydet
-    if file_path:
+    if from_file:
         save_path = Path(file_path)
     else:
         save_path = _resolve_save_path(output_path, lang)
@@ -491,6 +535,7 @@ Be specific and actionable. If you see an error message, quote it exactly."""
 
         response = gemini.call(contents, tier=gemini.SMART, timeout_ms=45_000)
         if response is None:
+            screenshot_path.unlink(missing_ok=True)
             return "Sir, I couldn't reach Gemini to analyse that screenshot."
 
         analysis = (response.text or "").strip()
@@ -503,13 +548,16 @@ Be specific and actionable. If you see an error message, quote it exactly."""
 
         if file_path and file_content:
 
-            code_match = re.search(r"```[a-zA-Z]*\n(.*?)```", analysis, re.DOTALL)
-            if code_match:
-                fixed_code = code_match.group(1).strip()
-                save_path  = Path(file_path)
-                _save_file(save_path, fixed_code)
-                analysis += f"\n\n✅ Fixed code has been saved to: {file_path}"
-                print(f"[Code] ✅ Fixed code saved: {file_path}")
+            # The analysis is free-form: its first block is often the quoted
+            # traceback and any block is based on a 4000-char excerpt. Save the
+            # last block NEXT TO the file for review — never over the original.
+            blocks = re.findall(r"```[a-zA-Z]*\n(.*?)```", analysis, re.DOTALL)
+            if blocks:
+                original  = Path(file_path)
+                save_path = original.with_name(f"{original.stem}.fixed{original.suffix}")
+                _save_file(save_path, blocks[-1].strip())
+                analysis += f"\n\n✅ Suggested fix saved next to your file: {save_path}"
+                print(f"[Code] ✅ Suggested fix saved: {save_path}")
 
         return analysis
 
@@ -573,7 +621,7 @@ def code_helper(
         return _run_action(file_path, args, timeout, player)
 
     elif action == "build":
-        return _build(description, language, output_path, args, timeout, speak, player)
+        return _build(description, language, output_path, args, timeout, speak, player, file_path)
 
     elif action == "optimize":
         return _optimize_action(file_path, code, language, output_path, player)

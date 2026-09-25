@@ -1,5 +1,7 @@
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 def get_base_dir() -> Path:
@@ -14,31 +16,56 @@ CONFIG_FILE = CONFIG_DIR / "api_keys.json"
 def ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
+def _read_for_update() -> dict:
+    """The current config, for a read-modify-write.
+
+    Every setter used to treat an unreadable file as empty and then write the
+    one new key back — replacing the Gemini key, names and plugin credentials.
+    An unreadable file is now moved aside (kept for recovery) instead, and a
+    UTF-8 BOM, which Notepad adds, is accepted."""
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    backup = CONFIG_FILE.with_name(f"api_keys.corrupt-{int(time.time())}.json")
+    os.replace(CONFIG_FILE, backup)
+    print(f"❌ api_keys.json was unreadable — kept it as {backup.name}")
+    return {}
+
+
+def _write_config(data: dict) -> None:
+    """Atomic write: a reader never sees a half-written file."""
+    ensure_config_dir()
+    tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)     # API key and plugin passwords: owner only
+    except OSError:
+        pass
+    os.replace(tmp, CONFIG_FILE)
+
+
 def config_exists() -> bool:
     return CONFIG_FILE.exists()
 
 def save_api_keys(gemini_api_key: str) -> None:
     ensure_config_dir()
 
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data: dict = _read_for_update()
 
     data["gemini_api_key"] = gemini_api_key.strip()
 
-    CONFIG_FILE.write_text(
-        json.dumps(data, indent=2),
-        encoding="utf-8"
-    )
+    _write_config(data)
 
 def load_api_keys() -> dict:
     if not CONFIG_FILE.exists():
         return {}
     try:
-        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        return json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
     except Exception as e:
         print(f"❌ Failed to load api_keys.json: {e}")
         return {}
@@ -64,15 +91,10 @@ def get_user_name() -> str:
 def save_assistant_config(assistant_name: str, user_name: str) -> None:
     """Persist assistant name and user name to config."""
     ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data: dict = _read_for_update()
     data["assistant_name"] = assistant_name.strip() or "JARVIS"
     data["user_name"] = user_name.strip()
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 # ── Assistant voice ──────────────────────────────────────────────────────────
@@ -93,15 +115,10 @@ def save_voice(voice_name: str) -> None:
     """Persist the chosen Live voice. Unknown names collapse to the default so a
     bad value can never reach the API and break the session."""
     ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data: dict = _read_for_update()
     v = (voice_name or "").strip()
     data["voice_name"] = v if v in AVAILABLE_VOICES else DEFAULT_VOICE
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def get_wake_word_enabled() -> bool:
@@ -111,14 +128,9 @@ def get_wake_word_enabled() -> bool:
 
 def save_wake_word_enabled(enabled: bool) -> None:
     ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data: dict = _read_for_update()
     data["wake_word_enabled"] = bool(enabled)
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def get_push_to_talk_enabled() -> bool:
@@ -205,17 +217,12 @@ def get_turn_tuning() -> dict:
 
 def save_turn_tuning(values: dict) -> None:
     ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data: dict = _read_for_update()
     cur = data.get("turn_tuning")
     cur = dict(cur) if isinstance(cur, dict) else {}
     cur.update(values or {})
     data["turn_tuning"] = cur
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def get_proactive_audio_enabled() -> bool:
@@ -255,14 +262,9 @@ def save_media_resolution(value: str) -> None:
 def _save_flag(key: str, value) -> None:
     """Read-modify-write one key without disturbing the rest of the config."""
     ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data: dict = _read_for_update()
     data[key] = bool(value) if isinstance(value, bool) else value
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def get_brief_enabled() -> bool:
@@ -271,14 +273,9 @@ def get_brief_enabled() -> bool:
 
 def save_brief_enabled(enabled: bool) -> None:
     ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data: dict = _read_for_update()
     data["morning_brief_enabled"] = enabled
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 # ── Audio devices ────────────────────────────────────────────────────────────
@@ -295,14 +292,9 @@ def _patch_config(**fields) -> None:
     setting is one line, and there is one place where a corrupt config file is
     handled instead of nine."""
     ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data: dict = _read_for_update()
     data.update(fields)
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def get_input_device() -> str:
@@ -350,12 +342,7 @@ def save_plugin_config(namespace: str, values: dict) -> None:
     """Merge `values` into a namespace's stored config (read-modify-write, like
     every other helper here). Only the provided keys are touched."""
     ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data: dict = _read_for_update()
     pc = data.get("plugin_config")
     if not isinstance(pc, dict):
         pc = {}
@@ -365,20 +352,15 @@ def save_plugin_config(namespace: str, values: dict) -> None:
     cur.update(values)
     pc[namespace] = cur
     data["plugin_config"] = pc
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)
 
 
 def save_plugin_enabled(plugin_name: str, enabled: bool) -> None:
     ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data: dict = _read_for_update()
     plugins_cfg = data.get("plugins_enabled")
     if not isinstance(plugins_cfg, dict):
         plugins_cfg = {}
     plugins_cfg[plugin_name] = enabled
     data["plugins_enabled"] = plugins_cfg
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data)

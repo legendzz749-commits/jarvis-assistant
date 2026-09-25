@@ -8,6 +8,9 @@ import tempfile
 import platform
 from pathlib import Path
 from datetime import datetime
+from types import SimpleNamespace
+
+from core.undo import push_undo
 
 try:
     import pyautogui
@@ -29,11 +32,8 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
     
 def _get_desktop() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DESKTOP_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Desktop"
+    from actions.file_controller import _known_folder   # user-dirs.dirs / OneDrive aware
+    return _known_folder("Desktop")
 
 def _build_sandbox() -> dict:
     import time
@@ -46,17 +46,21 @@ def _build_sandbox() -> dict:
         "isinstance": isinstance, "hasattr": hasattr, "getattr": getattr,
         "max": max, "min": min, "sum": sum, "abs": abs,
         "zip": zip, "map": map, "filter": filter,
+        "round": round, "any": any, "all": all, "set": set, "frozenset": frozenset,
+        "reversed": reversed, "next": next, "iter": iter, "repr": repr,
+        "divmod": divmod, "pow": pow, "chr": chr, "ord": ord,
+        "Exception": Exception, "OSError": OSError, "PermissionError": PermissionError,
+        "FileNotFoundError": FileNotFoundError, "FileExistsError": FileExistsError,
+        "ValueError": ValueError, "KeyError": KeyError,
     }
 
     sandbox = {
         "__builtins__": safe_builtins,
         "Path": Path,
         "time": time,
-        "shutil": type("shutil", (), {
-            "copy2":      shutil.copy2,
-            "copytree":   shutil.copytree,
-            "disk_usage": shutil.disk_usage,
-        })(),
+        # A class instance would bind these as methods (self = first arg).
+        "shutil": SimpleNamespace(copy2=shutil.copy2, copytree=shutil.copytree,
+                                  disk_usage=shutil.disk_usage),
         "os_path": os.path,  
     }
 
@@ -80,6 +84,27 @@ def _build_sandbox() -> dict:
     return sandbox
 
 
+def _confirm_and_execute(task: str, code: str, player=None) -> str:
+    """Model-written code cannot be sandboxed in-process — os is reachable
+    through os.path and Path can delete — so it only runs after the user reads
+    it on the HUD and presses CONFIRM."""
+    if code.startswith("ERROR:"):
+        # A failed Gemini call, not code — it used to be exec'd and reported
+        # as "invalid syntax".
+        return f"Could not work out how to do that: {code[6:].strip()}"
+    if code.strip() == "UNSAFE":
+        return "That desktop task cannot be done safely with the tools I have."
+    from core import confirm
+    if confirm.pending_title():
+        return ("There is already a confirmation waiting on screen. "
+                "Ask the user to answer that one first.")
+    preview = "\n".join(code.strip().splitlines()[:12])
+    return confirm.request(
+        key="desktop_task", title=f"Run desktop task: {task[:80]}", detail=preview,
+        run=lambda: _execute_generated_code(code, player=player),
+    )
+
+
 def _execute_generated_code(code: str, player=None) -> str:
     if not code or code.strip() == "UNSAFE":
         return "This action cannot be performed safely."
@@ -91,7 +116,8 @@ def _execute_generated_code(code: str, player=None) -> str:
 
     sandbox      = _build_sandbox()
     output_lines = []
-    sandbox["__builtins__"]["print"] = lambda *a: output_lines.append(" ".join(str(x) for x in a))
+    sandbox["__builtins__"]["print"] = (
+        lambda *a, sep=" ", end="\n", **_k: output_lines.append(sep.join(str(x) for x in a)))
 
     try:
         exec(compile(code, "<jarvis_desktop>", "exec"), sandbox)
@@ -153,6 +179,13 @@ Task: {task}"""
     except Exception as e:
         return f"ERROR: {e}"
 
+def _ran_ok(argv: list) -> bool:
+    try:
+        return subprocess.run(argv, capture_output=True, timeout=15).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def set_wallpaper(image_path: str) -> str:
     path = Path(image_path).expanduser().resolve()
     if not path.exists():
@@ -171,66 +204,70 @@ def set_wallpaper(image_path: str) -> str:
                     path = bmp_path
                 except ImportError:
                     pass 
-            ctypes.windll.user32.SystemParametersInfoW(20, 0, str(path), 3)
+            if not ctypes.windll.user32.SystemParametersInfoW(20, 0, str(path), 3):
+                return f"Could not set wallpaper: Windows rejected {path.name}."
             return f"Wallpaper set: {path.name}"
 
         elif _OS == "Darwin":
+            quoted = str(path).replace("\\", "\\\\").replace('"', '\\"')
             script = (
                 f'tell application "System Events" to tell every desktop to '
-                f'set picture to POSIX file "{path}"'
+                f'set picture to POSIX file "{quoted}"'
             )
-            subprocess.run(["osascript", "-e", script], capture_output=True)
+            if not _ran_ok(["osascript", "-e", script]):
+                return f"Could not set wallpaper: macOS refused {path.name}."
             return f"Wallpaper set: {path.name}"
 
         else:
             desktop_env = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
-            uri = f"file://{path}"
+            uri = path.as_uri()                     # percent-encodes spaces
 
             if "gnome" in desktop_env or "unity" in desktop_env:
-                subprocess.run([
-                    "gsettings", "set", "org.gnome.desktop.background",
-                    "picture-uri", uri
-                ], capture_output=True)
-                subprocess.run([
-                    "gsettings", "set", "org.gnome.desktop.background",
-                    "picture-uri-dark", uri
-                ], capture_output=True)
+                ok = _ran_ok(["gsettings", "set", "org.gnome.desktop.background",
+                              "picture-uri", uri])
+                # picture-uri-dark only exists on GNOME 42+, so it cannot decide success
+                _ran_ok(["gsettings", "set", "org.gnome.desktop.background",
+                         "picture-uri-dark", uri])
 
             elif "kde" in desktop_env:
-                # KDE Plasma
+                # plasma-apply-wallpaperimage is the supported tool (Plasma 5.24+);
+                # Plasma 6 renamed the D-Bus CLI to qdbus6.
                 script = f"""
 var allDesktops = desktops();
 for (var i = 0; i < allDesktops.length; i++) {{
     d = allDesktops[i];
     d.wallpaperPlugin = "org.kde.image";
     d.currentConfigGroup = ["Wallpaper", "org.kde.image", "General"];
-    d.writeConfig("Image", "file://{path}");
+    d.writeConfig("Image", {json.dumps(uri)});
 }}
 """
-                subprocess.run(
-                    ["qdbus", "org.kde.plasmashell", "/PlasmaShell",
-                     "org.kde.PlasmaShell.evaluateScript", script],
-                    capture_output=True
-                )
+                ok = (_ran_ok(["plasma-apply-wallpaperimage", str(path)])
+                      or any(_ran_ok([q, "org.kde.plasmashell", "/PlasmaShell",
+                                      "org.kde.PlasmaShell.evaluateScript", script])
+                             for q in ("qdbus6", "qdbus-qt6", "qdbus", "qdbus-qt5")))
 
             elif "xfce" in desktop_env:
-                subprocess.run([
-                    "xfconf-query", "-c", "xfce4-desktop",
-                    "-p", "/backdrop/screen0/monitor0/workspace0/last-image",
-                    "-s", str(path)
-                ], capture_output=True)
+                # XFCE 4.12+ keys backdrops by monitor name (monitoreDP-1, ...)
+                try:
+                    listing = subprocess.run(["xfconf-query", "-c", "xfce4-desktop", "-l"],
+                                             capture_output=True, text=True, timeout=15).stdout
+                except (OSError, subprocess.TimeoutExpired):
+                    listing = ""
+                props = [p for p in listing.split() if p.endswith("/last-image")]
+                ok = bool(props) and all(
+                    _ran_ok(["xfconf-query", "-c", "xfce4-desktop", "-p", p, "-s", str(path)])
+                    for p in props)
 
             else:
-                result = subprocess.run(
-                    ["feh", "--bg-scale", str(path)],
-                    capture_output=True
-                )
-                if result.returncode != 0:
+                ok = _ran_ok(["feh", "--bg-scale", str(path)])
+                if not ok:
                     return (
                         f"Could not set wallpaper automatically on {desktop_env}. "
                         f"Try manually or install 'feh'."
                     )
 
+            if not ok:
+                return f"Could not set wallpaper on {desktop_env or 'this desktop'}."
             return f"Wallpaper set: {path.name}"
 
     except Exception as e:
@@ -239,16 +276,23 @@ for (var i = 0; i < allDesktops.length; i++) {{
 
 def set_wallpaper_from_url(url: str) -> str:
     try:
+        import hashlib
         import urllib.request
-        suffix = Path(url.split("?")[0]).suffix or ".jpg"
-        tmp    = Path(tempfile.mktemp(suffix=suffix))
-        urllib.request.urlretrieve(url, str(tmp))
-        result = set_wallpaper(str(tmp))
-        try:
-            tmp.unlink()
-        except Exception:
-            pass
-        return result
+        if not url.lower().startswith(("http://", "https://")):
+            return "Only http(s) image links can be used as a wallpaper."
+        suffix = Path(url.split("?")[0]).suffix.lower() or ".jpg"
+        # Kept, not deleted: the OS reads the wallpaper file again later (on
+        # login, on a display change), so deleting it blanks the desktop.
+        folder = Path.home() / "Pictures" / "JARVIS Wallpapers"
+        folder.mkdir(parents=True, exist_ok=True)
+        dest = folder / (hashlib.sha1(url.encode()).hexdigest()[:16] + suffix)
+        # A timeout and a size cap: this runs inside a voice tool call.
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            data = resp.read(_WALLPAPER_MAX_BYTES + 1)
+        if len(data) > _WALLPAPER_MAX_BYTES:
+            return "That image is too large to use as a wallpaper (over 25 MB)."
+        dest.write_bytes(data)
+        return set_wallpaper(str(dest))
     except Exception as e:
         return f"Could not download wallpaper: {e}"
 
@@ -300,16 +344,54 @@ FILE_TYPE_MAP = {
 }
 
 _SKIP_EXTENSIONS = {
-    "Windows": {".lnk", ".url"},
+    "Windows": {".lnk", ".url", ".ini"},   # desktop.ini is a hidden system file
     "Darwin":  {".webloc"},
     "Linux":   {".desktop"},
 }
 
 
+_WALLPAPER_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _move_journaled(item: Path, new_path: Path, journal: list, failed: list) -> bool:
+    """One move of a bulk operation: a failure is recorded, not fatal."""
+    try:
+        shutil.move(str(item), str(new_path))
+    except OSError as e:
+        print(f"[Desktop] Could not move {item.name}: {e}")
+        failed.append(item.name)
+        return False
+    journal.append((item, new_path))
+    return True
+
+
+def _push_bulk_undo(label: str, journal: list, created: set) -> None:
+    """One undo that puts every file back and removes folders it made (if empty)."""
+    if not journal:
+        return
+
+    def _undo():
+        restored = 0
+        for src, dst in journal:
+            if dst.exists() and not src.exists():
+                shutil.move(str(dst), str(src))
+                restored += 1
+        for folder in created:
+            try:
+                if folder.is_dir() and not any(folder.iterdir()):
+                    folder.rmdir()
+            except OSError:
+                pass
+        return f"{restored} file(s) put back on the desktop."
+    push_undo(label, _undo)
+
+
 def organize_desktop(mode: str = "by_type") -> str:
     desktop       = _get_desktop()
     skip_exts     = _SKIP_EXTENSIONS.get(_OS, set())
-    moved, skipped = [], []
+    moved, skipped, failed = [], [], []
+    journal: list = []
+    created: set = set()
 
     for item in desktop.iterdir():
         if item.is_dir() or item.name.startswith("."):
@@ -329,16 +411,19 @@ def organize_desktop(mode: str = "by_type") -> str:
                     break
 
         target_dir = desktop / folder_name
-        target_dir.mkdir(exist_ok=True)
+        if not target_dir.exists():
+            target_dir.mkdir()
+            created.add(target_dir)
         new_path = target_dir / item.name
 
         if new_path.exists():
             skipped.append(item.name)
             continue
 
-        shutil.move(str(item), str(new_path))
-        moved.append(f"{item.name} → {folder_name}/")
+        if _move_journaled(item, new_path, journal, failed):
+            moved.append(f"{item.name} → {folder_name}/")
 
+    _push_bulk_undo(f"organized the desktop ({len(journal)} files)", journal, created)
     result = f"Desktop organized ({mode}): {len(moved)} files moved."
     if moved:
         result += "\n" + "\n".join(moved[:8])
@@ -346,6 +431,8 @@ def organize_desktop(mode: str = "by_type") -> str:
             result += f"\n... and {len(moved) - 8} more."
     if skipped:
         result += f"\n{len(skipped)} file(s) skipped (name conflict)."
+    if failed:
+        result += f"\n{len(failed)} file(s) could not be moved: {', '.join(failed[:5])}."
     return result
 
 
@@ -379,9 +466,11 @@ def clean_desktop() -> str:
     skip_exts   = _SKIP_EXTENSIONS.get(_OS, set())
     today       = datetime.now().strftime("%Y-%m-%d")
     archive_dir = desktop / f"Desktop Archive {today}"
+    created = set() if archive_dir.exists() else {archive_dir}
     archive_dir.mkdir(exist_ok=True)
 
-    moved = 0
+    journal: list = []
+    failed: list = []
     for item in desktop.iterdir():
         if item.is_dir() or item.name.startswith("."):
             continue
@@ -389,10 +478,13 @@ def clean_desktop() -> str:
             continue
         new_path = archive_dir / item.name
         if not new_path.exists():
-            shutil.move(str(item), str(new_path))
-            moved += 1
+            _move_journaled(item, new_path, journal, failed)
 
-    return f"Desktop cleaned: {moved} files archived to '{archive_dir.name}'."
+    _push_bulk_undo(f"cleaned the desktop ({len(journal)} files)", journal, created)
+    result = f"Desktop cleaned: {len(journal)} files archived to '{archive_dir.name}'."
+    if failed:
+        result += f" {len(failed)} could not be moved: {', '.join(failed[:5])}."
+    return result
 
 
 def get_desktop_stats() -> str:
@@ -469,12 +561,12 @@ def desktop_control(
                 player.write_log("[Desktop] Generating action...")
 
             code = _ask_gemini_for_desktop_action(actual_task)
-            return _execute_generated_code(code, player=player)
+            return _confirm_and_execute(actual_task, code, player=player)
 
         else:
             if action:
                 code = _ask_gemini_for_desktop_action(action)
-                return _execute_generated_code(code, player=player)
+                return _confirm_and_execute(action, code, player=player)
             return "No action or task specified."
 
     except Exception as e:

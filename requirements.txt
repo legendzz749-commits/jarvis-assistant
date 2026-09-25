@@ -55,6 +55,7 @@ tinytuya
 comtypes;   sys_platform == "win32"
 pycaw;      sys_platform == "win32"
 win10toast; sys_platform == "win32"
+setuptools<81; sys_platform == "win32"   # win10toast imports pkg_resources, removed in setuptools 81+
 pywinauto;  sys_platform == "win32"
 pywin32;    sys_platform == "win32"
 wmi;        sys_platform == "win32"
@@ -71,7 +72,7 @@ pdfplumber                   # file_processor — PDF text and tables
 PyPDF2                       # file_processor — PDF fallback reader
 python-docx                  # file_processor — .docx reading
 paho-mqtt                    # printer_control plugin — MQTT printers
-pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
+nvidia-ml-py                 # `import pynvml` for system_monitor + the HUD's GPU meter (the old pynvml package is deprecated)
 
 # ── Optional: heavy extras, install only if you want the feature ──────────────
 # Left out on purpose — together they are several hundred megabytes, which is a

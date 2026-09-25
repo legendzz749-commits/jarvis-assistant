@@ -1,7 +1,8 @@
 import json
+import os
 import re
 from datetime import datetime
-from threading import Lock
+from threading import RLock
 from pathlib import Path
 import sys
 
@@ -14,7 +15,10 @@ def get_base_dir() -> Path:
 
 BASE_DIR         = get_base_dir()
 MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
-_lock            = Lock()
+# Re-entrant, so one writer can hold it across its whole load → modify → save;
+# held only around the single read and write, concurrent writers (a tool call
+# and the monitor thread) overwrote each other's changes.
+_lock            = RLock()
 MAX_VALUE_LENGTH = 380
 
 # ── Why there are two very different numbers here ────────────────────────────
@@ -65,11 +69,50 @@ def load_memory() -> dict:
                 for key in base:
                     if key not in data:
                         data[key] = {}
+                    elif not isinstance(data[key], dict):
+                        # A hand-edited list/string here crashed prompt building,
+                        # so no session could connect. Keep it, out of the way.
+                        data[f"_{key}_unreadable"] = data[key]
+                        data[key] = {}
                 return data
             return _empty_memory()
         except Exception as e:
             print(f"[Memory] ⚠️ Load error: {e}")
+            _set_aside_unreadable(e)
             return _empty_memory()
+
+
+def _set_aside_unreadable(err: Exception) -> None:
+    """Move an unreadable store out of the way before anything can save over it.
+
+    Every writer is load → modify → write, so returning an empty memory alone
+    meant the next save replaced every stored fact with just the new one."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = MEMORY_PATH.with_name(f"long_term.corrupt-{stamp}.json")
+    try:
+        os.replace(MEMORY_PATH, backup)
+    except OSError:
+        return
+    if _trim_notifier:
+        try:
+            _trim_notifier(f"SYS: Memory file was unreadable ({err}) — kept it as {backup.name}")
+        except Exception:
+            pass
+
+
+def _write_memory_file(memory: dict) -> None:
+    """Write the whole store atomically. Caller holds _lock.
+
+    write_text truncates first, so a crash or full disk mid-write used to leave
+    a half-written file behind — which the next load then treated as empty."""
+    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = MEMORY_PATH.with_name(MEMORY_PATH.name + ".tmp")
+    tmp.write_text(json.dumps(memory, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)     # personal facts: owner only
+    except OSError:
+        pass
+    os.replace(tmp, MEMORY_PATH)
 
 def _all_entries(memory: dict) -> list[tuple]:
     entries = []
@@ -119,12 +162,8 @@ def save_memory(memory: dict) -> None:
     if not isinstance(memory, dict):
         return
     memory = _trim_to_limit(memory)
-    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _write_memory_file(memory)
 
 
 def _truncate_value(val: str) -> str:
@@ -133,18 +172,21 @@ def _truncate_value(val: str) -> str:
     return val
 
 
-def _recursive_update(target: dict, updates: dict) -> bool:
+def _recursive_update(target: dict, updates: dict, _depth: int = 0) -> bool:
     changed = False
     for key, value in updates.items():
         if value is None:
             continue
         if isinstance(value, str) and not value.strip():
             continue
-        if isinstance(value, dict) and "value" not in value:
+        # The top level is always categories: a fact whose key is "value"
+        # ({"notes": {"value": …}}) used to be read as an entry and replaced
+        # the whole category.
+        if isinstance(value, dict) and ("value" not in value or _depth == 0):
             if key not in target or not isinstance(target[key], dict):
                 target[key] = {}
                 changed = True
-            if _recursive_update(target[key], value):
+            if _recursive_update(target[key], value, _depth + 1):
                 changed = True
         else:
             new_val  = _truncate_value(str(value["value"] if isinstance(value, dict) else value))
@@ -159,10 +201,11 @@ def _recursive_update(target: dict, updates: dict) -> bool:
 def update_memory(memory_update: dict) -> dict:
     if not isinstance(memory_update, dict) or not memory_update:
         return load_memory()
-    memory = load_memory()
-    if _recursive_update(memory, memory_update):
-        save_memory(memory)
-        print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
+    with _lock:
+        memory = load_memory()
+        if _recursive_update(memory, memory_update):
+            save_memory(memory)
+            print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
     return memory
 
 def _entry_value(entry) -> str:
@@ -189,6 +232,9 @@ _CATEGORY_LABELS = {
 
 _IDENTITY_FIELDS = ["name", "age", "birthday", "city", "job",
                     "language", "school", "nationality"]
+
+# Top-level keys that hold app state, not facts about the person.
+_NOT_FACTS = {"identity", "monitors", "sessions"}
 
 
 def format_memory_for_prompt(memory: dict | None) -> str:
@@ -233,16 +279,22 @@ def format_memory_for_prompt(memory: dict | None) -> str:
                 f"always answer in the language of their CURRENT message)")
         else:
             core_lines.append(f"{field.title()}: {val}")
-    for key, entry in identity.items():
-        if key in _IDENTITY_FIELDS:
-            continue
-        val = _entry_value(entry)
-        if val:
-            core_lines.append(f"{_pretty(key).title()}: {val}")
+    # Facts saved under a category of their own ("health", "pets") are shown
+    # and indexed like the labelled ones rather than silently left out.
+    labels = dict(_CATEGORY_LABELS)
+    for cat, entries in memory.items():
+        if (cat not in labels and cat not in _NOT_FACTS
+                and not cat.startswith("_") and isinstance(entries, dict)):
+            labels[cat] = _pretty(cat).title()
 
-    # 2. Everything else, most recently updated first
+    # 2. Everything else, most recently updated first. Identity entries beyond
+    # the standard fields compete for the budget too, ahead of the rest.
     rest: list[tuple[str, str, str, str]] = []   # (updated, cat, key, value)
-    for cat in _CATEGORY_LABELS:
+    for key, entry in identity.items():
+        val = _entry_value(entry)
+        if key not in _IDENTITY_FIELDS and val:
+            rest.append(("9999", "identity", key, val))
+    for cat in labels:
         for key, entry in (memory.get(cat, {}) or {}).items():
             val = _entry_value(entry)
             if not val:
@@ -262,12 +314,20 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     # pure recency systematically buries them.
     per_cat_used: dict[str, int] = {}
     for _updated, cat, key, val in rest:
-        line = f"  - {_pretty(key).title()}: {val}"
-        if (per_cat_used.get(cat, 0) < PROMPT_MAX_PER_CATEGORY
-                and used + len(line) + 1 <= PROMPT_CORE_CHARS):
-            shown.setdefault(cat, []).append(line)
-            per_cat_used[cat] = per_cat_used.get(cat, 0) + 1
-            used += len(line) + 1
+        if cat == "identity":
+            line, cost = f"{_pretty(key).title()}: {val}", 0
+        else:
+            line = f"  - {_pretty(key).title()}: {val}"
+            # the category's blank line and header ride along with its first entry
+            cost = 0 if cat in shown else len(labels[cat]) + 3
+        if ((cat == "identity" or per_cat_used.get(cat, 0) < PROMPT_MAX_PER_CATEGORY)
+                and used + cost + len(line) + 1 <= PROMPT_CORE_CHARS):
+            if cat == "identity":
+                core_lines.append(line)
+            else:
+                shown.setdefault(cat, []).append(line)
+                per_cat_used[cat] = per_cat_used.get(cat, 0) + 1
+            used += cost + len(line) + 1
         else:
             overflow.setdefault(cat, []).append(_pretty(key))
 
@@ -278,7 +338,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     # about — would fall off the end.
     indexed: list[str] = []
     if overflow:
-        cats  = [c for c in _CATEGORY_LABELS if overflow.get(c)]
+        cats  = [c for c in ["identity", *labels] if overflow.get(c)]
         cursor = {c: 0 for c in cats}
         while cats:
             for cat in list(cats):
@@ -289,7 +349,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
                 indexed.append(overflow[cat][i])
                 cursor[cat] = i + 1
 
-    for cat, label in _CATEGORY_LABELS.items():
+    for cat, label in labels.items():
         if shown.get(cat):
             core_lines.append("")
             core_lines.append(f"{label}:")
@@ -326,12 +386,21 @@ def format_memory_for_prompt(memory: dict | None) -> str:
 
 # ── Recall ────────────────────────────────────────────────────────────────────
 
+def _fold(text: str) -> str:
+    """Accent- and case-insensitive form: "Ayşe" and the key ayse_sister must
+    meet ("who is Ayşe?" used to find nothing)."""
+    import unicodedata
+    text = text.casefold().replace("ı", "i").replace("ß", "ss").replace("ø", "o")
+    return "".join(c for c in unicodedata.normalize("NFKD", text)
+                   if not unicodedata.combining(c))
+
+
 def _score(query_words: list[str], cat: str, key: str, value: str) -> int:
     """Cheap lexical relevance. No embeddings, no network, no model call - this
     runs in well under a millisecond, which is the entire point: recall must
     cost one model round trip, never two."""
-    hay_key = _pretty(key).lower()
-    hay_val = value.lower()
+    hay_key = _fold(_pretty(key))
+    hay_val = _fold(value)
     score   = 0
     for w in query_words:
         if not w:
@@ -353,7 +422,7 @@ def search_memory(query: str, limit: int = 8) -> str:
     An empty query is treated as "show me everything you know", capped - the
     model asks that when the user says "what do you remember about me?"."""
     memory = load_memory()
-    words  = [w for w in re.split(r"[^\w]+", (query or "").lower()) if len(w) > 1]
+    words  = [w for w in re.split(r"[^\w]+", _fold(query or "")) if len(w) > 1]
 
     rows: list[tuple[int, str, str, str]] = []
     for cat, items in memory.items():
@@ -403,6 +472,7 @@ def all_entries_for_ui() -> list[dict]:
 
 def remember(key: str, value: str, category: str = "notes") -> str:
     valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes"}
+    category = str(category or "notes").strip().casefold()
     if category not in valid:
         category = "notes"
     update_memory({category: {key: {"value": value}}})
@@ -410,13 +480,14 @@ def remember(key: str, value: str, category: str = "notes") -> str:
 
 
 def forget(key: str, category: str = "notes") -> str:
-    memory = load_memory()
-    cat    = memory.get(category, {})
-    if key in cat:
-        del cat[key]
-        memory[category] = cat
-        save_memory(memory)
-        return f"Forgotten: {category}/{key}"
+    with _lock:
+        memory = load_memory()
+        cat    = memory.get(category, {})
+        if key in cat:
+            del cat[key]
+            memory[category] = cat
+            save_memory(memory)
+            return f"Forgotten: {category}/{key}"
     return f"Not found: {category}/{key}"
 
 
@@ -433,24 +504,20 @@ def save_session_summary(summary: str, language: str = "") -> None:
     summary = (summary or "").strip()
     if not summary:
         return
-    memory   = load_memory()
-    sessions = memory.get("sessions", [])
-    if not isinstance(sessions, list):
-        sessions = []
     entry: dict = {
         "date":    datetime.now().strftime("%Y-%m-%d"),
         "summary": summary[:280],
     }
     if language:
         entry["language"] = language
-    sessions.append(entry)
-    memory["sessions"] = sessions[-_SESSION_MAX:]
     with _lock:
-        MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        memory   = load_memory()
+        sessions = memory.get("sessions", [])
+        if not isinstance(sessions, list):
+            sessions = []
+        sessions.append(entry)
+        memory["sessions"] = sessions[-_SESSION_MAX:]
+        _write_memory_file(memory)
     print(f"[Memory] 📝 Session saved ({entry['date']}): {summary[:60]}…")
 
 
@@ -467,12 +534,11 @@ def pop_last_session() -> dict | None:
             sessions = memory.get("sessions", [])
             if not isinstance(sessions, list) or not sessions:
                 return None
-            entry = sessions.pop()          # remove the last entry
-            memory["sessions"] = sessions
-            MEMORY_PATH.write_text(
-                json.dumps(memory, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            entry = sessions.pop()          # the newest is the one worth saying
+            # Older ones are consumed too: left behind, they surfaced days later
+            # as "yesterday we talked about…".
+            memory["sessions"] = []
+            _write_memory_file(memory)
             return entry
         except Exception as e:
             print(f"[Memory] ⚠️ pop_last_session error: {e}")

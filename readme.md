@@ -37,7 +37,7 @@ It's not just an assistant — it's an extension of your digital life.
 | 🎙️ Wake Word | Local **"Hey Jarvis"** detection — sleeps until called, auto-sleeps after 2 min of silence, and never streams audio while asleep |
 | ⚡ Instant Acknowledgment | Speaks a short, context-aware reply in **your language** the instant a longer task starts — no more silent waiting |
 | 🚀 Faster Live Engine | Runs on **Gemini 3.1 Flash Live** — roughly 2× faster time-to-first-word than the previous model |
-| 🧩 Self-Describing Skills | Actions and plugins share one shape (`TOOL` / `PLUGIN` dict + `run()`), auto-discovered at launch — adding a skill is a single file |
+| 🧩 Self-Describing Skills | Actions (`TOOL` dict with a `handler`) and plugins (`PLUGIN` dict + `run()`) are auto-discovered at launch — adding a skill is a single file |
 | 🧠 Recallable Memory | No size limit and nothing silently forgotten — the prompt carries what fits, the rest is looked up on demand from a local search |
 | 👁️ Memory Panel | See every fact JARVIS has stored about you, when it learned it, and delete any of it in one click |
 | ↩️ Undo | Take back what the assistant did — files it moved, renamed, created or wrote, and settings it changed |
@@ -62,7 +62,7 @@ It's not just an assistant — it's an extension of your digital life.
 | 📊 Hardware Monitoring | Continuous CPU, RAM, GPU and temperature telemetry with localized voice alerts |
 | 🌤️ Weather Report | Live weather data for your city, personalized from memory |
 | 🗺️ Dynamic Content Panel | Scrollable display layer beneath the HUD that renders web results, news, and search data |
-| 🔍 Multi-Mode Web Search | `news` / `research` / `price` / `compare` / `search` — Gemini Grounded first, DDG fallback |
+| 🔍 Multi-Mode Web Search | `news` / `research` / `price` / `compare` / `search` — Gemini Grounded first, DDG fallback (news: DDG first) |
 | ⏰ Smart Reminders | OS-native scheduled notifications (Windows Task Scheduler / macOS LaunchAgent / Linux systemd) |
 | ✈️ Flight Finder | Live flight price and availability lookup |
 | 🎮 Game Updater | Checks and triggers game updates on Steam and Epic Games on demand |
@@ -280,13 +280,15 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 ```bash
 git clone https://github.com/FatihMakes/Mark-LIV.git
 cd Mark-LIV
+python -m venv .venv   # recommended — required on Ubuntu 23.04+, Debian 12+ and Homebrew Python
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 python setup.py        # installs deps for YOUR OS + the browser automation engine
 python main.py
 ```
 
 `setup.py` only ever installs what your operating system needs — the Windows-only libraries are skipped automatically on macOS and Linux, and vice-versa. It also checks your Python version up front, so a wrong interpreter fails with a sentence instead of a wall of pip output. Prefer to do it by hand? `pip install -r requirements.txt` works too.
 
-> ⚠️ **Installation Note:** If you hit a `ModuleNotFoundError` for an OS-specific package, install it with `pip install <module_name>`. The optional **wake word** engine is *not* installed here — grab it in one click from **⚙ → WAKE WORD** inside the app.
+> ⚠️ **Installation Note:** If you hit a `ModuleNotFoundError`, re-run `python setup.py` (or `pip install -r requirements.txt`) — module and package names differ: `win32com` / `win32api` / `pythoncom` come from `pywin32`, `cv2` from `opencv-python`, `PIL` from `pillow`. The optional **wake word** engine is *not* installed here — grab it in one click from **⚙ → WAKE WORD** inside the app.
 
 ---
 
@@ -313,14 +315,10 @@ Mark LIV/
 ├── setup.py                  # OS-aware installer (skips wrong-OS dependencies, checks your Python)
 ├── .gitignore                # Keeps your API key, TLS key and memories out of the repository
 ├── plugins/
-│   ├── quiz.py               # Interactive quiz — JARVIS writes the questions, you answer on screen
-│   ├── document_review.py    # Contracts and policies in plain language, ordered by what matters
-│   ├── _google_core.py       # Shared OAuth for the Gmail/Calendar plugins (not a plugin itself)
-│   ├── _printer_core.py      # Shared printer connectivity (not a plugin itself)
 │   ├── _template.py          # Copy this to write a new plugin — one file, drop in, done
 │   └── ...                   # Drop-in skills (each self-describes via a PLUGIN dict + run())
 ├── actions/                  # Bundled skills — each self-describes via a TOOL dict + handler
-│   ├── web_search.py         # Gemini + DDG parallel search (news, research, price, compare)
+│   ├── web_search.py         # Gemini grounded search, DDG fallback (news: DDG first)
 │   ├── screen_processor.py   # Screen & webcam capture for vision
 │   ├── background_monitor.py # User-configured topic watching — daily DDG check
 │   ├── proactive.py          # Proactive 2.0 — time/context/rotation-aware check-ins
@@ -375,17 +373,20 @@ Mark LIV/
 
 ## 🔒 Your Data
 
-Everything stays on your machine. There is no MARK server, no telemetry and no account.
+Your files and settings stay on your machine. There is no MARK server, no telemetry and no account.
 
 | What | Where | Notes |
 |---|---|---|
-| Gemini API key, plugin credentials | `config/api_keys.json` | **Plaintext.** Anyone with your user account can read it. Treat it like a password file. |
+| Gemini API key, plugin credentials | `config/api_keys.json` | **Plaintext**, readable only by your user account (the app writes it owner-only on macOS and Linux). Treat it like a password file. |
 | Dashboard TLS certificate + private key | `config/certs/` | Generated locally, self-signed, never leaves the machine. |
 | What the assistant remembers about you | `memory/long_term.json` | Delete the file to make it forget everything. |
 
 All three are listed in `.gitignore`, so a fork or a pull request cannot leak them by accident. **If you have already committed `config/api_keys.json` anywhere public, revoke that key** at [aistudio.google.com](https://aistudio.google.com/app/apikey) and generate a new one — removing the file in a later commit does not remove it from the history.
 
-Your voice is streamed to Google's Gemini Live API while a session is open; that is the one thing that leaves your computer, and it stops when you mute or close the app.
+What does leave your computer, and where it goes:
+
+* **To Google (Gemini API):** your voice while a session is open (it stops when you mute or close the app), anything you type, and the system prompt, which includes your stored memories, your name, the assistant's name and your OS. Screen and webcam frames go too when you ask it to look, and so do file and code contents when you ask it to read, summarise or fix them.
+* **To search engines:** web search queries go to Google and DuckDuckGo. Weather lookups go to Open-Meteo.
 
 ---
 

@@ -162,9 +162,20 @@
     }
 
     function _authHeader() { return { 'Authorization': `Bearer ${_authToken}` }; }
-    function _authFetch(url, opts = {}) {
+    // A token dies when JARVIS restarts. Without this the tab stayed open,
+    // silently dropping every command; /login re-pairs (a known device does so
+    // automatically with its device token).
+    function _sessionExpired() {
+      sessionStorage.removeItem('jarvis_token');
+      sessionStorage.removeItem('jarvis_key');
+      location.replace('/login');
+    }
+
+    async function _authFetch(url, opts = {}) {
       opts.headers = Object.assign({}, opts.headers, _authHeader());
-      return fetch(url, opts);
+      const res = await fetch(url, opts);
+      if (res.status === 401) _sessionExpired();
+      return res;
     }
 
     // ── AES-256-CBC encryption (CryptoJS) ────────────────────────────────────
@@ -210,8 +221,11 @@
     const _wsUrl   = `${_wsProto}://${location.host}/ws?token=${encodeURIComponent(_authToken)}`;
     const ws       = new WebSocket(_wsUrl);
 
-    ws.onopen    = () => { sys('Remote session active.'); toast('Connected to JARVIS'); };
-    ws.onclose   = () => sys('Connection lost — refresh to reconnect.');
+    let _wsOpened = false;
+    ws.onopen    = () => { _wsOpened = true; sys('Remote session active.'); toast('Connected to JARVIS'); };
+    // Closed before it ever opened = the server rejected the token (4001).
+    ws.onclose   = (e) => { if (!_wsOpened || e.code === 4001) _sessionExpired();
+                            else sys('Connection lost — refresh to reconnect.'); };
     ws.onerror   = () => sys('Connection error.');
     ws.onmessage = (e) => {
       const m = JSON.parse(e.data);
@@ -299,6 +313,9 @@
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/upload');
       xhr.setRequestHeader('Authorization', `Bearer ${_authToken}`);
+      const uploadId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+      _myUploads.add(uploadId);
+      xhr.setRequestHeader('X-Upload-Id', uploadId);
 
       xhr.upload.onprogress = (e) => {
         if (!e.lengthComputable) return;
@@ -346,7 +363,12 @@
     }
 
     // File received by another WebSocket client (e.g., second open tab)
+    // This tab already shows a card for its own uploads; the server's echo of
+    // them would add a second one.
+    const _myUploads = new Set();
+
     function _onFileReceived(m) {
+      if (m.upload_id && _myUploads.has(m.upload_id)) return;
       const dlUrl = `/uploads/${encodeURIComponent(m.name)}?token=${encodeURIComponent(_authToken)}`;
       const card  = document.createElement('div');
       card.className = 'msg-file';
@@ -362,7 +384,7 @@
       `;
       feed.appendChild(card);
       feed.scrollTop = feed.scrollHeight;
-      toast('File received on computer!');
+      if (!m.replay) toast('File received on computer!');
     }
 
     // File input change handler
@@ -408,6 +430,7 @@
     // ── Real-time Voice — PCM16 WebSocket → Gemini Live ──────────────────────
     const micBtn  = document.getElementById('mic-btn');
     let _voiceWs  = null;
+    let _voiceStarting = false;
     let _audioCtx = null;
     let _micStm   = null;
     let _audioNd  = null;
@@ -464,6 +487,14 @@
 
     async function doMic() {
       if (_voiceWs) { _stopVoice(); return; }
+      // getUserMedia is async: a second tap before it resolved used to start a
+      // second capture pipeline that Stop could never reach.
+      if (_voiceStarting) return;
+      _voiceStarting = true;
+      try { await _startVoice(); } finally { _voiceStarting = false; }
+    }
+
+    async function _startVoice() {
 
       if (!navigator.mediaDevices?.getUserMedia) {
         _showVoiceSetup();
@@ -536,8 +567,8 @@
         toast('🎤 Live');
       };
 
-      ws.onclose = () => { _stopVoice(); };
-      ws.onerror = () => { sys('Voice connection failed.'); _stopVoice(); };
+      ws.onclose = () => { if (ws === _voiceWs) _stopVoice(); };
+      ws.onerror = () => { sys('Voice connection failed.'); if (ws === _voiceWs) _stopVoice(); };
 
       _voiceWs  = ws;
       _audioCtx = ctx;

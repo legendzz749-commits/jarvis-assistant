@@ -14,7 +14,9 @@ name: Semgrep
 jobs:
   semgrep:
     name: semgrep/ci
-    runs-on: self-hosted
+    # GitHub-hosted: no runner ever served the self-hosted label (every run was
+    # cancelled), and a self-hosted runner would execute fork PRs' code.
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
@@ -23,4 +25,7 @@ jobs:
       image: semgrep/semgrep
     steps:
     - uses: actions/checkout@v6
-    - run: semgrep ci
+    # With a Semgrep App token, use the org's policy; without one (forks, or no
+    # secret configured) still scan with the public rules, report-only.
+    - run: |
+        if [ -n "$SEMGREP_APP_TOKEN" ]; then semgrep ci; else semgrep scan --config auto; fi

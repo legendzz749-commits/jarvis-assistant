@@ -63,6 +63,7 @@ _SAFE_SCREENSHOT_ROOTS = (
 
 def _safe_screenshot_path(requested: str | None) -> Path:
     fallback = Path.home() / "Desktop" / "jarvis_screenshot.png"
+    fallback.parent.mkdir(parents=True, exist_ok=True)   # accounts without a Desktop folder
     if not requested:
         return fallback
     try:
@@ -112,14 +113,16 @@ def _random_data(data_type: str) -> str:
         return f"{random.choice(_FIRST_NAMES).lower()}{random.randint(100, 9999)}"
 
     if dt == "password":
+        import secrets   # random is predictable; a password must not be
         chars = string.ascii_letters + string.digits + "!@#$%"
-        raw   = (
-            random.choice(string.ascii_uppercase)
-            + random.choice(string.digits)
-            + random.choice("!@#$%")
-            + "".join(random.choices(chars, k=9))
-        )
-        return "".join(random.sample(raw, len(raw)))
+        raw   = [
+            secrets.choice(string.ascii_uppercase),
+            secrets.choice(string.digits),
+            secrets.choice("!@#$%"),
+            *(secrets.choice(chars) for _ in range(9)),
+        ]
+        secrets.SystemRandom().shuffle(raw)
+        return "".join(raw)
 
     if dt == "phone":
         return f"+1{random.randint(200,999)}{random.randint(1_000_000, 9_999_999)}"
@@ -149,14 +152,27 @@ def _user_profile() -> dict:
         if _MEMORY_PATH.exists():
             data     = json.loads(_MEMORY_PATH.read_text(encoding="utf-8"))
             identity = data.get("identity", {})
-            return {k: v.get("value", "") for k, v in identity.items()}
+            # older stores kept plain strings; one of those made .get() raise
+            # and every field fall back to the empty profile
+            return {k: (v.get("value", "") if isinstance(v, dict) else str(v))
+                    for k, v in identity.items()}
     except Exception:
         pass
     return {}
 
+def _off_corner(x: int, y: int) -> tuple[int, int]:
+    """Keep the pointer out of the screen corners: pyautogui treats reaching one
+    as its emergency stop and fails every later call."""
+    w, h = pyautogui.size()
+    return min(max(x, 1), w - 2), min(max(y, 1), h - 2)
+
+
 def _type(text: str, interval: float = 0.03) -> str:
     _require_pyautogui()
     time.sleep(0.3)
+    # pyautogui can only type ASCII; anything else is silently dropped.
+    if not text.isascii() and _paste_via_clipboard(text):
+        return f"Typed: {text[:60]}{'…' if len(text) > 60 else ''}"
     pyautogui.typewrite(text, interval=interval)
     return f"Typed: {text[:60]}{'…' if len(text) > 60 else ''}"
 
@@ -167,11 +183,7 @@ def _smart_type(text: str, clear_first: bool = True) -> str:
         _clear_field()
         time.sleep(0.1)
 
-    if len(text) > 20 and _PYPERCLIP:
-        pyperclip.copy(text)
-        time.sleep(0.1)
-        paste_key = "command" if _get_os() == "mac" else "ctrl"
-        pyautogui.hotkey(paste_key, "v")
+    if (len(text) > 20 or not text.isascii()) and _paste_via_clipboard(text):
         return f"Smart-typed (clipboard): {text[:60]}{'…' if len(text) > 60 else ''}"
 
     pyautogui.typewrite(text, interval=0.04)
@@ -202,7 +214,9 @@ def _press(key: str) -> str:
 def _scroll(direction: str = "down", amount: int = 3) -> str:
     _require_pyautogui()
     vertical   = direction in ("up", "down")
-    clicks     = amount if direction in ("up", "right") else -amount
+    # pyautogui counts 1/120 notch on Windows but whole notches elsewhere
+    notches    = amount * 120 if _get_os() == "windows" else amount
+    clicks     = notches if direction in ("up", "right") else -notches
     pyautogui.scroll(clicks) if vertical else pyautogui.hscroll(clicks)
     return f"Scrolled {direction} ×{amount}"
 
@@ -228,15 +242,40 @@ def _clipboard_get() -> str:
     return "(copied — pyperclip unavailable for read)"
 
 
-def _clipboard_paste(text: str) -> str:
-    if _PYPERCLIP:
+def _copy_to_clipboard(text: str) -> bool:
+    """False when there is no clipboard backend — pyperclip imports fine on
+    Linux without xclip/xsel/wl-clipboard and only fails on first use."""
+    if not _PYPERCLIP:
+        return False
+    try:
         pyperclip.copy(text)
-        time.sleep(0.1)
-        _require_pyautogui()
-        paste_key = "command" if _get_os() == "mac" else "ctrl"
-        pyautogui.hotkey(paste_key, "v")
+        return True
+    except pyperclip.PyperclipException:
+        return False
+
+
+def _paste_via_clipboard(text: str) -> bool:
+    """Paste text with the paste shortcut, then give the user back what they
+    had copied. False when there is no clipboard backend."""
+    try:
+        previous = pyperclip.paste() if _PYPERCLIP else None
+    except pyperclip.PyperclipException:
+        previous = None
+    if not _copy_to_clipboard(text):
+        return False
+    time.sleep(0.1)
+    pyautogui.hotkey("command" if _get_os() == "mac" else "ctrl", "v")
+    time.sleep(0.4)          # let the app read the clipboard before it is restored
+    if previous is not None:
+        _copy_to_clipboard(previous)
+    return True
+
+
+def _clipboard_paste(text: str) -> str:
+    _require_pyautogui()
+    if _paste_via_clipboard(text):
         return f"Pasted: {text[:60]}{'…' if len(text) > 60 else ''}"
-    return "pyperclip not available"
+    return "No clipboard available (on Linux install xclip, xsel or wl-clipboard)."
 
 
 def _screenshot(save_path: str | None = None) -> str:
@@ -301,6 +340,8 @@ def _focus_window(title: str) -> str:
                 ["xdotool", "search", "--name", title, "windowactivate"],
                 capture_output=True, timeout=5,
             )
+            if result.returncode != 0:      # no window matched
+                return f"No window matching '{title}' found."
             time.sleep(0.3)
             return f"Focused window: {title}"
         except FileNotFoundError:
@@ -323,6 +364,10 @@ def _screen_find(description: str) -> tuple[int, int] | None:
         _require_pyautogui()
         w, h  = pyautogui.size()
         img   = pyautogui.screenshot()
+        if img.size != (w, h):
+            # Retina/HiDPI: the capture is in physical pixels (2w×2h) while
+            # clicks are in logical points. Send what the prompt describes.
+            img = img.resize((w, h))
         buf   = io.BytesIO()
         img.save(buf, format="PNG")
         image_bytes = buf.getvalue()
@@ -348,7 +393,9 @@ def _screen_find(description: str) -> tuple[int, int] | None:
 
         match = re.search(r"(\d+)\s*,\s*(\d+)", text)
         if match:
-            return int(match.group(1)), int(match.group(2))
+            x, y = int(match.group(1)), int(match.group(2))
+            if 0 <= x < w and 0 <= y < h:
+                return x, y
 
     except Exception as e:
         print(f"[ComputerControl] ⚠️ screen_find failed: {e}")
@@ -435,13 +482,15 @@ def computer_control(
             return _click(params.get("x"), params.get("y"), "right", 1)
 
         if action == "move":
-            return _move(int(params.get("x", 0)), int(params.get("y", 0)))
+            if params.get("x") is None or params.get("y") is None:
+                return "move needs both x and y."
+            return _move(*_off_corner(int(params["x"]), int(params["y"])))
 
         if action == "drag":
-            return _drag(
-                int(params.get("x1", 0)), int(params.get("y1", 0)),
-                int(params.get("x2", 0)), int(params.get("y2", 0)),
-            )
+            if any(params.get(k) is None for k in ("x1", "y1", "x2", "y2")):
+                return "drag needs x1, y1, x2 and y2."
+            return _drag(*_off_corner(int(params["x1"]), int(params["y1"])),
+                         *_off_corner(int(params["x2"]), int(params["y2"])))
 
         if action == "hotkey":
             raw  = params.get("keys", "")
@@ -494,7 +543,8 @@ def computer_control(
         if action == "random_data":
             dt     = params.get("type", "name")
             result = _random_data(dt)
-            print(f"[ComputerControl] 🎲 random {dt} → {result}")
+            print(f"[ComputerControl] 🎲 random {dt} → "
+                  f"{'(hidden)' if dt == 'password' else result}")
             return result
 
         if action == "user_data":
@@ -502,8 +552,8 @@ def computer_control(
             profile = _user_profile()
             value   = profile.get(field, "")
             if not value:
-                value = _random_data(field)
-                print(f"[ComputerControl] ⚠️ No '{field}' in memory, using random: {value}")
+                return (f"NOT_IN_MEMORY: I don't have the user's {field} stored. "
+                        f"Ask the user for it — do not make one up.")
             return value
 
         return f"Unknown action: '{action}'"

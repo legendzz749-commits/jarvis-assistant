@@ -2,6 +2,7 @@ import subprocess
 import sys
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -34,6 +35,12 @@ def _get_model(model_name: str = gemini.SMART):
         def generate_content(self, contents):
             resp = gemini.call(contents, tier=model_name, timeout_ms=60000)
             if resp is None:
+                # gemini.call swallows the 429 itself; every rung cooling down
+                # is how a quota failure shows up here, and the back-off and
+                # "rate limit" messages below depend on recognising it.
+                ladder = gemini._LADDERS.get(model_name, ())
+                if ladder and all(gemini._cooling(m) for m in ladder):
+                    raise RuntimeError("429 RESOURCE_EXHAUSTED: every model is cooling down")
                 raise RuntimeError("every Gemini model on the ladder failed")
             return resp
 
@@ -47,20 +54,50 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+def _topological(files: list[dict]) -> list[dict]:
+    """Files after the project files they import, keeping the planner's order
+    otherwise (a cycle leaves the remaining files in that order)."""
+    # "utils/helpers.py" is imported as "utils.helpers"
+    by_module = {str(Path(f.get("path", "")).with_suffix("")).replace("\\", "/").replace("/", "."): f
+                 for f in files}
+    done, out = set(), []
+
+    def visit(f, stack=()):
+        key = f.get("path", "")
+        if key in done or key in stack:
+            return
+        for imp in f.get("imports", []):
+            dep = by_module.get(str(imp))
+            if dep is not None and dep is not f:
+                visit(dep, stack + (key,))
+        done.add(key)
+        out.append(f)
+
+    for f in files:
+        visit(f)
+    return out
+
+
 def _is_rate_limit(error: Exception) -> bool:
     msg = str(error).lower()
     return "429" in msg or "quota" in msg or "resource_exhausted" in msg
 
 
-def _parse_traceback(output: str, project_files: list[str]) -> tuple[str | None, int | None]:
+def _parse_traceback(output: str, project_files: list[str],
+                     project_dir: Path | None = None) -> tuple[str | None, int | None]:
 
     pattern = re.compile(r'File ["\']([^"\']+\.py)["\'],\s+line\s+(\d+)', re.IGNORECASE)
     matches = pattern.findall(output)
 
     for raw_path, line_str in reversed(matches):
-        raw_name = Path(raw_path).name
+        frame = Path(raw_path)
         for pf in project_files:
-            if Path(pf).name == raw_name or pf == raw_path or raw_path.endswith(pf):
+            # The frame must be that file IN this project — matching the name
+            # alone blamed site-packages/requests/utils.py on the project's utils.py.
+            if project_dir is not None and frame.is_absolute():
+                if frame.resolve() == (project_dir / pf).resolve():
+                    return pf, int(line_str)
+            elif raw_path.replace("\\", "/") == pf.replace("\\", "/"):
                 return pf, int(line_str)
 
     return None, None
@@ -70,14 +107,14 @@ def _classify_error(output: str) -> str:
 
     low = output.lower()
 
-    if any(x in low for x in ("no module named", "modulenotfounderror", "importerror")):
-        return "dependency_error"
-
     if "syntaxerror" in low or "invalid syntax" in low:
         return "syntax_error"
-    
-    if "cannot import" in low or "importerror" in low:
+
+    if "cannot import" in low:
         return "import_error"
+
+    if any(x in low for x in ("no module named", "modulenotfounderror", "importerror")):
+        return "dependency_error"
 
     if any(x in low for x in (
         "traceback", "exception", "error:", "nameerror", "typeerror",
@@ -95,6 +132,8 @@ def _has_error(output: str, run_command: str) -> bool:
 
     if "timed out" in low:
         return False
+    if output.startswith(("Command not found", "Refusing to run", "Run error")):
+        return True
 
     if not output.strip():
         return False
@@ -227,7 +266,7 @@ Code for {file_path}:"""
         response = model.generate_content(prompt)
         code = _strip_fences(response.text)
 
-        full_path = project_dir / file_path
+        full_path = _in_project(project_dir, file_path)
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(code, encoding="utf-8")
 
@@ -239,7 +278,28 @@ Code for {file_path}:"""
             raise RateLimitError(str(e))
         raise
 
+def _in_project(project_dir: Path, rel_path: str) -> Path:
+    """Resolve a planner-supplied path, refusing anything outside the project
+    ("../../.bashrc", absolute paths) — the plan is model output."""
+    full = (project_dir / rel_path).resolve()
+    if not full.is_relative_to(project_dir.resolve()):
+        raise ValueError(f"refusing to write outside the project: {rel_path}")
+    return full
+
+
+# A requirement such as "requests", "flask>=2.0" or "uvicorn[standard]". Anything
+# else — "--index-url=…", a URL, a path — is a pip option, not a package.
+_REQUIREMENT = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?"
+    r"([<>=!~]=?[A-Za-z0-9.*+!_-]+)?(,[<>=!~]=?[A-Za-z0-9.*+!_-]+)*"
+)
+
+
 def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
+    rejected = [d for d in dependencies if not _REQUIREMENT.fullmatch(d.replace(" ", ""))]
+    if rejected:
+        print(f"[DevAgent] ⚠️ Ignoring non-package dependency entries: {rejected}")
+    dependencies = [d for d in dependencies if d not in rejected]
     if not dependencies:
         return "No external dependencies."
 
@@ -281,10 +341,14 @@ def _open_vscode(project_dir: Path) -> bool:
         r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
     ]
     for cmd in vscode_candidates:
+        # No shell: with shell=True and a list, POSIX runs "code" alone and the
+        # project path is dropped; resolve the executable instead.
+        exe = cmd if Path(cmd).is_absolute() and Path(cmd).exists() else shutil.which(cmd)
+        if not exe:
+            continue
         try:
             subprocess.Popen(
-                [cmd, str(project_dir)],
-                shell=True,
+                [exe, str(project_dir)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
@@ -299,8 +363,12 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
     print(f"[DevAgent] 🚀 Running: {run_command}")
     try:
         parts = run_command.split()
-        if parts[0].lower() == "python":
+        interpreter = parts[0].lower() if parts else ""
+        if interpreter in ("python", "python3", "py"):
             parts[0] = sys.executable
+        elif interpreter != "node":
+            return (f"Refusing to run '{run_command}': only python or node "
+                    f"entry points are run automatically.")
 
         result = subprocess.run(
             parts,
@@ -362,7 +430,7 @@ def _fix_files(
 
     model = _get_model(MODEL_PLANNER)
 
-    error_file, error_line = _parse_traceback(error_output, list(file_codes.keys()))
+    error_file, error_line = _parse_traceback(error_output, list(file_codes.keys()), project_dir)
     error_type = _classify_error(error_output)
 
     files_to_fix: list[str] = []
@@ -425,7 +493,7 @@ Fixed code for {fix_path}:"""
             response = model.generate_content(prompt)
             fixed = _strip_fences(response.text)
 
-            full_path = project_dir / fix_path
+            full_path = _in_project(project_dir, fix_path)
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(fixed, encoding="utf-8")
 
@@ -468,6 +536,10 @@ def _build_project(
     proj_name    = project_name or plan.get("project_name", "jarvis_project")
     proj_name    = re.sub(r"[^\w\-]", "_", proj_name)
     project_dir  = PROJECTS_DIR / proj_name
+    n = 2
+    while project_dir.exists() and any(project_dir.iterdir()):
+        project_dir = PROJECTS_DIR / f"{proj_name}-{n}"
+        n += 1
     project_dir.mkdir(parents=True, exist_ok=True)
 
     files        = plan.get("files", [])
@@ -477,10 +549,10 @@ def _build_project(
 
     log(f"Project: {proj_name} | Files: {len(files)} | Entry: {entry_point}")
 
-    def _dep_sort_key(fi: dict) -> int:
-        return len(fi.get("imports", []))
-
-    sorted_files = sorted(files, key=_dep_sort_key)
+    # The planner is told to list files in dependency order, so each file is
+    # written with the code of what it imports already in hand. Re-sorting by
+    # import count broke that; only a real dependency sort may reorder it.
+    sorted_files = _topological(files)
 
     file_codes: dict[str, str] = {}
 
@@ -518,7 +590,11 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
-    if dependencies:
+    if dependencies and language.lower() != "python":
+        # pip cannot install npm packages; installing same-named PyPI projects
+        # into JARVIS's own environment was worse than doing nothing.
+        log(f"Install the project's dependencies with its package manager: {', '.join(dependencies)}")
+    elif dependencies:
         install_result = _install_dependencies(dependencies, project_dir)
         log(install_result)
 
@@ -545,7 +621,7 @@ def _build_project(
             break
 
         error_type = _classify_error(last_output)
-        if error_type == "dependency_error" and auto_installs < 3:
+        if error_type == "dependency_error" and auto_installs < 3 and language.lower() == "python":
             installed = _try_auto_install(last_output, project_dir)
             if installed:
                 auto_installs += 1

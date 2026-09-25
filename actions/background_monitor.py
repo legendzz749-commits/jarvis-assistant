@@ -4,7 +4,6 @@ Checks DDG news once per day per topic; alerts JARVIS when a new headline appear
 No crypto, no finance, no uninvited tracking.
 """
 import hashlib
-import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -22,14 +21,21 @@ _BLOCKED = {
 }
 
 def _is_blocked(topic: str) -> bool:
-    t = topic.lower()
-    return any(word in t for word in _BLOCKED)
+    # Whole words: as substrings "crypto" rejected "cryptography", "token"
+    # rejected "tokens of appreciation" topics and so on. Scripts without word
+    # breaks (Japanese) still match as substrings.
+    words = set(re.findall(r"\w+", topic.casefold()))
+    return bool(words & {w.casefold() for w in _BLOCKED}) or any(
+        not w.isascii() and w in topic for w in _BLOCKED)
 
 
 # ── Slug / hash helpers ────────────────────────────────────────────────────────
 
 def _slug(topic: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", topic.lower().strip())[:40].strip("_")
+    # \w keeps letters of every script — [a-z0-9] turned any Turkish-only,
+    # Cyrillic or CJK topic into "", so all of them shared one key.
+    slug = re.sub(r"\W+", "_", topic.casefold().strip())[:40].strip("_")
+    return slug or hashlib.md5(topic.encode("utf-8")).hexdigest()[:12]
 
 def _title_hash(title: str) -> str:
     return hashlib.md5(title.encode("utf-8", errors="ignore")).hexdigest()[:12]
@@ -43,15 +49,11 @@ def _load() -> dict:
     return data if isinstance(data, dict) else {}
 
 def _save(monitors: dict) -> None:
-    from memory.memory_manager import load_memory, MEMORY_PATH, _lock
-    memory = load_memory()
-    memory["monitors"] = monitors
-    with _lock:
-        MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+    from memory.memory_manager import load_memory, _lock, _write_memory_file
+    with _lock:                       # one read-modify-write, not two separate steps
+        memory = load_memory()
+        memory["monitors"] = monitors
+        _write_memory_file(memory)
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -120,10 +122,11 @@ def check_all() -> list[str]:
 
         topic = data.get("topic", slug)
         try:
-            results = _ddg_news(topic, max_results=5)
+            # News results carry a source. When news() fails, _ddg_news falls
+            # back to a web search, whose pages are not headlines; and a failed
+            # check must be retried later, not marked done for the day.
+            results = [r for r in _ddg_news(topic, max_results=5) if r.get("source")]
             if not results:
-                monitors[slug]["last_check"] = today
-                changed = True
                 continue
 
             top   = results[0]
@@ -154,6 +157,15 @@ def check_all() -> list[str]:
             print(f"[Monitor] ⚠️ Check failed for '{topic}': {e}")
 
     if changed:
-        _save(monitors)
+        # The news checks take a while; add_monitor/remove_monitor may have run
+        # meanwhile. Apply only this check's fields to the monitors that still
+        # exist instead of writing the stale snapshot back.
+        latest = _load()
+        for slug, data in monitors.items():
+            if slug in latest:
+                for field in ("last_check", "last_hash"):
+                    if field in data:
+                        latest[slug][field] = data[field]
+        _save(latest)
 
     return alerts

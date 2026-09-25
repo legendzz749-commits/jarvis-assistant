@@ -98,12 +98,19 @@ def _boundary_loop(faces: np.ndarray) -> np.ndarray:
 
     start = border[0][0]
     loop, prev, cur = [start], None, start
-    while True:
+    # Bounded: a truncated or damaged mesh has sub-loops that never return to
+    # `start`, and an unbounded walk hung startup while eating memory. Raising
+    # lets the HUD fall back to the reactor core instead.
+    for _ in range(len(border) + 1):
         nxt = [v for v in adj[cur] if v != prev]
         if not nxt or nxt[0] == start:
             break
         prev, cur = cur, nxt[0]
         loop.append(cur)
+    else:
+        raise ValueError("face mesh border is not a single closed loop")
+    if len(loop) != len(border):
+        raise ValueError("face mesh border is not a single closed loop")
     return np.array(loop)
 
 
@@ -292,8 +299,10 @@ def build_head() -> dict:
     jaw = np.clip((mouth_y - verts[:, 1]) / (mouth_y - chin_y), 0.0, 1.0) ** 0.8
     jaw *= np.clip(0.30 + 0.85 * (verts[:, 2] / 0.55), 0.0, 1.0)
     jaw[n_head:] = 0.0                                  # the neck never moves
-    jaw[LANDMARKS["lips_in"][:10]] = 1.0                # lower inner lip leads
-    jaw[LANDMARKS["lips_out"][:10]] = 0.95
+    # Indices 1-9 are the lower lip; 0 and 10 are the two mouth corners. [:10]
+    # pinned one corner to the jaw and not the other — a lopsided open mouth.
+    jaw[LANDMARKS["lips_in"][1:10]] = 1.0               # lower inner lip leads
+    jaw[LANDMARKS["lips_out"][1:10]] = 0.95
 
     # ── brow rig ────────────────────────────────────────────────────────────
     # Raising the brows displaces the actual surface rather than sliding a drawn

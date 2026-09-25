@@ -1,9 +1,24 @@
 # Contains API keys — never commit
 config.json
+config/api_keys.json
+
+# Dashboard TLS key pair — generated locally on first run
+config/certs/
+
+# Personal memories the assistant stores about you
+memory/long_term*.json*
+
+# Generated from config/jarvis.ico by the Linux autostart setup
+config/jarvis.png
 
 # Runtime data
 jarvis_memory.json
 reminders.json
+# Phone uploads (fallback folder) and screenshots taken from the repo folder
+uploads/
+screenshot.png
+*_scrot.png
+.env
 
 # Python
 __pycache__/

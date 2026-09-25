@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import platform
 from pathlib import Path
@@ -25,6 +26,9 @@ def _undo_move(src: Path, dst: Path):
     def _fn():
         if not dst.exists():
             return f"'{dst.name}' is no longer there — nothing moved back."
+        if src.exists():
+            return (f"Something new is at '{src.name}' in {src.parent.name}/ now — "
+                    f"not moving back over it.")
         src.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(dst), str(src))
         return f"'{src.name}' is back in {src.parent.name}/."
@@ -50,7 +54,7 @@ def _undo_create(target: Path):
     return _fn
 
 
-def _undo_write(target: Path, previous: str | None):
+def _undo_write(target: Path, previous: bytes | None):
     """Reverse of a write: restore the old contents, or remove a file that did
     not exist before the write created it."""
     def _fn():
@@ -60,7 +64,7 @@ def _undo_write(target: Path, previous: str | None):
                 return f"Removed '{target.name}' — it did not exist before."
             return f"'{target.name}' is already gone."
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(previous, encoding="utf-8")
+        target.write_bytes(previous)
         return f"Restored the previous contents of '{target.name}'."
     return _fn
 
@@ -86,8 +90,29 @@ def _restore_from_trash(original: Path) -> str:
                         return f"'{original.name}' restored from the Recycle Bin."
         except Exception as e:
             print(f"[file] Recycle Bin restore failed: {e}")
-    return (f"'{original.name}' is in the Recycle Bin — I could not pull it back "
-            f"automatically, but it is there and can be restored by hand.")
+    elif _OS == "Linux":
+        # freedesktop.org trash: files/<name> plus info/<name>.trashinfo with Path=
+        from urllib.parse import unquote
+        trash = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "Trash"
+        infos = sorted((trash / "info").glob("*.trashinfo"),
+                       key=lambda f: f.stat().st_mtime, reverse=True)
+        for info in infos:
+            line = next((ln for ln in info.read_text(encoding="utf-8", errors="replace").splitlines()
+                         if ln.startswith("Path=")), "")
+            stored = trash / "files" / info.stem
+            if unquote(line[5:]) == str(original) and stored.exists() and not original.exists():
+                original.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(stored), str(original))
+                info.unlink(missing_ok=True)
+                return f"'{original.name}' restored from the Trash."
+    elif _OS == "Darwin":
+        stored = Path.home() / ".Trash" / original.name
+        if stored.exists() and not original.exists():
+            shutil.move(str(stored), str(original))
+            return f"'{original.name}' restored from the Trash."
+    # Raising makes undo say it could not undo, instead of "Undone: …".
+    raise RuntimeError(f"'{original.name}' is in the Trash / Recycle Bin but could not be "
+                       f"pulled back automatically — restore it from there by hand")
 
 
 _SAFE_ROOTS: list[Path] = [
@@ -105,48 +130,50 @@ def _is_safe_path(target: Path) -> bool:
     except Exception:
         return False
 
-def _get_desktop() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DESKTOP_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Desktop"
+# Where the standard folders really are. XDG_*_DIR is almost never exported to
+# the environment — it lives in ~/.config/user-dirs.dirs (a Turkish desktop is
+# ~/Masaüstü) — and Windows moves them into OneDrive; the registry says where.
+_XDG_KEYS = {"Desktop": "XDG_DESKTOP_DIR", "Downloads": "XDG_DOWNLOAD_DIR",
+             "Documents": "XDG_DOCUMENTS_DIR", "Pictures": "XDG_PICTURES_DIR",
+             "Music": "XDG_MUSIC_DIR", "Videos": "XDG_VIDEOS_DIR"}
+_WIN_SHELL_KEYS = {"Desktop": "Desktop", "Documents": "Personal",
+                   "Pictures": "My Pictures", "Music": "My Music", "Videos": "My Video",
+                   "Downloads": "{374DE290-123F-4565-9164-39C4925E467B}"}
 
-def _get_downloads() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DOWNLOAD_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Downloads"
 
-def _get_documents() -> Path:
+def _known_folder(name: str) -> Path:
     if _OS == "Linux":
-        xdg = os.environ.get("XDG_DOCUMENTS_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Documents"
+        key = _XDG_KEYS[name]
+        value = os.environ.get(key, "")
+        if not value:
+            cfg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "user-dirs.dirs"
+            try:
+                m = re.search(rf'^{key}="([^"]*)"', cfg.read_text(encoding="utf-8"), re.MULTILINE)
+                value = m.group(1).replace("$HOME", str(Path.home())) if m else ""
+            except OSError:
+                value = ""
+        if value and Path(value).exists():
+            return Path(value)
+    elif _OS == "Windows":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as k:
+                raw, _ = winreg.QueryValueEx(k, _WIN_SHELL_KEYS[name])
+            folder = Path(os.path.expandvars(raw))
+            if folder.exists():
+                return folder
+        except OSError:
+            pass
+    return Path.home() / name
 
-def _get_pictures() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_PICTURES_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Pictures"
 
-def _get_music() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_MUSIC_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Music"
-
-def _get_videos() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_VIDEOS_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Videos"
-
+def _get_desktop() -> Path:   return _known_folder("Desktop")
+def _get_downloads() -> Path: return _known_folder("Downloads")
+def _get_documents() -> Path: return _known_folder("Documents")
+def _get_pictures() -> Path:  return _known_folder("Pictures")
+def _get_music() -> Path:     return _known_folder("Music")
+def _get_videos() -> Path:    return _known_folder("Videos")
 
 def _resolve_path(raw: str) -> Path:
     shortcuts: dict[str, Path] = {
@@ -212,7 +239,11 @@ def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
             if item.is_dir():
                 items.append(f"📁 {item.name}/")
             else:
-                size = _format_size(item.stat().st_size)
+                try:
+                    size = _format_size(item.stat().st_size)
+                except OSError:   # a dangling symlink used to fail the whole listing
+                    items.append(f"🔗 {item.name} (broken link)")
+                    continue
                 items.append(f"📄 {item.name} ({size})")
 
         if not items:
@@ -234,15 +265,19 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
             return f"Access denied: {target}"
         target.parent.mkdir(parents=True, exist_ok=True)
         existed = target.exists()
-        previous = None
+        previous, undoable = None, True
         if existed:
             try:
-                previous = target.read_text(encoding="utf-8", errors="ignore")
+                if target.stat().st_size > _UNDO_CONTENT_LIMIT:
+                    undoable = False
+                else:
+                    previous = target.read_bytes()
             except Exception:
-                previous = None
+                undoable = False     # None would mean "did not exist" and undo would delete it
         target.write_text(content, encoding="utf-8")
-        push_undo(f"created {target.name}",
-                  _undo_write(target, previous) if existed else _undo_create(target))
+        if undoable:
+            push_undo(f"created {target.name}",
+                      _undo_write(target, previous) if existed else _undo_create(target))
         return f"File created: {target.name}"
     except Exception as e:
         return f"Could not create file: {e}"
@@ -313,6 +348,8 @@ def move_file(path: str, name: str = "", destination: str = "") -> str:
 
         if dst.is_dir():
             dst = dst / src.name
+        if dst.exists():
+            return f"'{dst.name}' already exists in {dst.parent.name}/ — not overwriting it."
 
         dst.parent.mkdir(parents=True, exist_ok=True)
         origin = src.resolve()
@@ -342,6 +379,11 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
 
         if dst.is_dir():
             dst = dst / src.name
+        if dst.exists():
+            return f"'{dst.name}' already exists in {dst.parent.name}/ — not overwriting it."
+
+        if src.is_dir() and dst.resolve().is_relative_to(src.resolve()):
+            return f"Cannot copy '{src.name}' into itself."
 
         dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -378,9 +420,13 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
             return f"Not found: {target.name}"
         if not new_name:
             return "No new name provided."
+        if Path(new_name).name != new_name or new_name in (".", ".."):
+            return "The new name must be a plain name, not a path — use move for that."
 
         new_path = target.parent / new_name
-        if new_path.exists():
+        # On case-insensitive disks (Windows, macOS) "Report.pdf" exists when
+        # renaming report.pdf to it — that is the same file, not a collision.
+        if new_path.exists() and not new_path.samefile(target):
             return f"A file named '{new_name}' already exists here."
 
         old_path = target.resolve()
@@ -404,9 +450,11 @@ def read_file(path: str, name: str = "", max_chars: int = 4000) -> str:
         if not target.is_file():
             return f"Not a file: {target.name}"
 
-        content = target.read_text(encoding="utf-8", errors="ignore")
+        with open(target, encoding="utf-8", errors="ignore") as f:
+            content = f.read(max_chars + 1)
         if len(content) > max_chars:
-            content = content[:max_chars] + f"\n\n[Truncated — {len(content)} total chars]"
+            size = _format_size(target.stat().st_size)
+            content = content[:max_chars] + f"\n\n[Truncated — file is {size}]"
         return content
 
     except Exception as e:
@@ -424,16 +472,16 @@ def write_file(path: str, name: str = "", content: str = "",
 
         # Snapshot before writing. None means "did not exist", which is a
         # different undo (delete it) from "existed and had this in it".
-        previous: str | None = None
+        previous: bytes | None = None
         undoable = True
         if target.exists():
             try:
                 if target.stat().st_size > _UNDO_CONTENT_LIMIT:
                     undoable = False       # too large to hold in memory
                 else:
-                    previous = target.read_text(encoding="utf-8", errors="ignore")
+                    previous = target.read_bytes()
             except Exception:
-                undoable = False           # binary, locked, unreadable
+                undoable = False           # locked, unreadable
 
         mode = "a" if append else "w"
         with open(target, mode, encoding="utf-8") as f:
@@ -450,6 +498,9 @@ def write_file(path: str, name: str = "", content: str = "",
         return f"Could not write file: {e}"
 
 
+_SKIP_DIRS = {"node_modules", "__pycache__", "AppData", "Library", "venv", "site-packages"}
+
+
 def find_files(name: str = "", extension: str = "",
                path: str = "home", max_results: int = 20) -> str:
     try:
@@ -462,26 +513,39 @@ def find_files(name: str = "", extension: str = "",
         results    = []
         dir_count  = 0
         max_dirs   = 500  # performance + safety limit
+        truncated  = False
+        if extension:
+            extension = "." + extension.lstrip(".")
 
-        for item in search_path.rglob("*"):
-            if item.is_dir():
-                dir_count += 1
-                if dir_count > max_dirs:
+        for root, dirnames, filenames in os.walk(search_path):
+            # Hidden and cache trees (.cache, node_modules…) hold thousands of
+            # folders and never the file someone asks for by voice.
+            dirnames[:] = [d for d in dirnames
+                           if not d.startswith(".") and d not in _SKIP_DIRS]
+            dir_count += 1
+            if dir_count > max_dirs:
+                truncated = True
+                break
+            for fname in filenames:
+                item = Path(root) / fname
+                if extension and item.suffix.lower() != extension.lower():
+                    continue
+                if name and name.lower() not in fname.lower():
+                    continue
+                if not item.is_file():
+                    continue
+                size = _format_size(item.stat().st_size)
+                results.append(f"📄 {item.name} ({size}) — {item.parent}")
+                if len(results) >= max_results:
                     break
-                continue
-            if not item.is_file():
-                continue
-            if extension and item.suffix.lower() != extension.lower():
-                continue
-            if name and name.lower() not in item.name.lower():
-                continue
-            size = _format_size(item.stat().st_size)
-            results.append(f"📄 {item.name} ({size}) — {item.parent}")
             if len(results) >= max_results:
                 break
 
         if not results:
             query = name or extension or "files"
+            if truncated:
+                return (f"No {query} found in the first {max_dirs} folders of "
+                        f"{search_path.name}/ — try a narrower folder.")
             return f"No {query} found in {search_path.name}/"
 
         return f"Found {len(results)} file(s):\n" + "\n".join(results)
@@ -551,8 +615,9 @@ def organize_desktop() -> str:
     }
 
     desktop = _get_desktop()
-    moved, skipped = [], []
+    moved, skipped, failed = [], [], []
     journal: list[tuple[Path, Path]] = []   # (where it was, where it went)
+    created: set[Path] = set()              # folders this run made — the only ones undo may remove
 
     try:
         for item in desktop.iterdir():
@@ -569,15 +634,21 @@ def organize_desktop() -> str:
                     target_dir = desktop / folder
                     break
 
-            target_dir.mkdir(exist_ok=True)
             new_path = target_dir / item.name
-
             if new_path.exists():
                 skipped.append(item.name)
                 continue
 
             origin = item.resolve()
-            shutil.move(str(item), str(new_path))
+            try:
+                if not target_dir.exists():
+                    target_dir.mkdir()
+                    created.add(target_dir.resolve())
+                shutil.move(str(item), str(new_path))
+            except Exception as e:           # open in another app, permissions…
+                print(f"[file] organize: {item.name}: {e}")
+                failed.append(item.name)
+                continue
             journal.append((origin, new_path.resolve()))
             moved.append(f"{item.name} → {target_dir.name}/")
 
@@ -598,7 +669,7 @@ def organize_desktop() -> str:
                         print(f"[file] undo organize: {moved_to.name}: {e}")
                 # Clear away the folders we created, but only while they are
                 # empty — anything the user put in since stays.
-                for folder in {m.parent for _o, m in entries}:
+                for folder in {m.parent for _o, m in entries} & created:
                     try:
                         if folder.exists() and folder.is_dir() and not any(folder.iterdir()):
                             folder.rmdir()
@@ -615,6 +686,8 @@ def organize_desktop() -> str:
                 result += f"\n... and {len(moved) - 8} more."
         if skipped:
             result += f"\n{len(skipped)} file(s) skipped (name conflict)."
+        if failed:
+            result += f"\n{len(failed)} file(s) could not be moved: {', '.join(failed[:5])}."
         return result
 
     except Exception as e:
@@ -631,12 +704,17 @@ def get_file_info(path: str, name: str = "") -> str:
             return f"Not found: {target.name}"
 
         stat = target.stat()
+        born = getattr(stat, "st_birthtime", None)       # macOS, Windows on 3.12+
+        if born is None and os.name == "nt":
+            born = stat.st_ctime                         # creation time on Windows
+        # On Linux st_ctime is the last metadata change, not the creation time.
+        stamp = ("Created", born) if born is not None else ("Changed", stat.st_ctime)
         info = {
             "Name":      target.name,
             "Type":      "Folder" if target.is_dir() else "File",
             "Size":      _format_size(stat.st_size),
             "Location":  str(target.parent),
-            "Created":   datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M"),
+            stamp[0]:    datetime.fromtimestamp(stamp[1]).strftime("%Y-%m-%d %H:%M"),
             "Modified":  datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
             "Extension": target.suffix or "—",
         }
@@ -747,6 +825,10 @@ TOOL = {
             "content": {
                 "type": "STRING",
                 "description": "Content for create_file/write"
+            },
+            "append": {
+                "type": "BOOLEAN",
+                "description": "write only: add content to the end instead of replacing the file"
             },
             "name": {
                 "type": "STRING",
