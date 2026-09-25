@@ -18,6 +18,14 @@ import sys
 from pathlib import Path
 
 OS = platform.system()  # "Windows" | "Darwin" | "Linux"
+
+# The messages below use emoji; a cp1252/cp932 console or a redirected pipe on
+# Windows would raise UnicodeEncodeError on the first print.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 HERE = Path(__file__).resolve().parent
 
 MIN_PY = (3, 11)        # hard floor: below this the syntax used here won't parse
@@ -110,7 +118,7 @@ def main() -> None:
 
     # requirements.txt filters OS-specific extras by itself via pip markers.
     _run("Installing Python dependencies (OS-specific extras auto-filtered)…",
-         [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+         [sys.executable, "-m", "pip", "install", "-r", str(HERE / "requirements.txt")])
 
     # Chromium covers Chrome/Edge/Opera/Brave/Vivaldi; Firefox for Firefox.
     # (Safari automation additionally needs: python -m playwright install webkit)

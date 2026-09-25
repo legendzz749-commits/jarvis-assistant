@@ -369,12 +369,21 @@ def format_memory_for_prompt(memory: dict | None) -> str:
 
 # ── Recall ────────────────────────────────────────────────────────────────────
 
+def _fold(text: str) -> str:
+    """Accent- and case-insensitive form: "Ayşe" and the key ayse_sister must
+    meet ("who is Ayşe?" used to find nothing)."""
+    import unicodedata
+    text = text.casefold().replace("ı", "i").replace("ß", "ss").replace("ø", "o")
+    return "".join(c for c in unicodedata.normalize("NFKD", text)
+                   if not unicodedata.combining(c))
+
+
 def _score(query_words: list[str], cat: str, key: str, value: str) -> int:
     """Cheap lexical relevance. No embeddings, no network, no model call - this
     runs in well under a millisecond, which is the entire point: recall must
     cost one model round trip, never two."""
-    hay_key = _pretty(key).lower()
-    hay_val = value.lower()
+    hay_key = _fold(_pretty(key))
+    hay_val = _fold(value)
     score   = 0
     for w in query_words:
         if not w:
@@ -396,7 +405,7 @@ def search_memory(query: str, limit: int = 8) -> str:
     An empty query is treated as "show me everything you know", capped - the
     model asks that when the user says "what do you remember about me?"."""
     memory = load_memory()
-    words  = [w for w in re.split(r"[^\w]+", (query or "").lower()) if len(w) > 1]
+    words  = [w for w in re.split(r"[^\w]+", _fold(query or "")) if len(w) > 1]
 
     rows: list[tuple[int, str, str, str]] = []
     for cat, items in memory.items():
@@ -507,8 +516,10 @@ def pop_last_session() -> dict | None:
             sessions = memory.get("sessions", [])
             if not isinstance(sessions, list) or not sessions:
                 return None
-            entry = sessions.pop()          # remove the last entry
-            memory["sessions"] = sessions
+            entry = sessions.pop()          # the newest is the one worth saying
+            # Older ones are consumed too: left behind, they surfaced days later
+            # as "yesterday we talked about…".
+            memory["sessions"] = []
             _write_memory_file(memory)
             return entry
         except Exception as e:

@@ -77,3 +77,17 @@ def test_a_non_dict_category_does_not_break_the_prompt(mem_path):
     memory = mm.load_memory()
     assert memory["preferences"] == {} and memory["_preferences_unreadable"] == ["coffee", "tea"]
     mm.format_memory_for_prompt(memory)
+
+
+def test_recall_ignores_accents(mem_path):
+    mm.save_memory({**mm._empty_memory(), "relationships": {
+        "ayse_sister": {"value": "older sister, lives in Izmir", "updated": "2026-01-02"}}})
+    assert "lives in Izmir" in mm.search_memory("Ayşe")
+
+
+def test_popping_the_briefing_summary_consumes_older_ones_too(mem_path):
+    mm.save_memory(mm._empty_memory())
+    mm.save_session_summary("Morning: planned the trip.")
+    mm.save_session_summary("Evening: booked flights.")
+    assert mm.pop_last_session()["summary"] == "Evening: booked flights."
+    assert mm.pop_last_session() is None
