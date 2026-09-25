@@ -1,5 +1,6 @@
 #youtube_video.py
 import json
+import platform
 import re
 import sys
 import time
@@ -117,16 +118,21 @@ def _is_valid_youtube_url(url: str) -> bool:
 
 
 def _ask_for_url(prompt_text: str = "YouTube video URL:") -> str | None:
+    # Tools run on arbitrary executor threads. A Tk root belongs to the thread
+    # that made it, so one is created and destroyed per call; on macOS Tk off
+    # the main thread aborts the process, so there the URL must be spoken.
+    if platform.system() == "Darwin":
+        return None
     try:
         import tkinter as tk
         from tkinter import simpledialog
 
-        root = tk._default_root
-        if root is None:
-            root = tk.Tk()
-            root.withdraw()
-
-        url = simpledialog.askstring("J.A.R.V.I.S", prompt_text, parent=root)
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            url = simpledialog.askstring("J.A.R.V.I.S", prompt_text, parent=root)
+        finally:
+            root.destroy()
         return url.strip() if url else None
     except Exception as e:
         print(f"[YouTube] ⚠️ URL dialog failed: {e}")
@@ -137,7 +143,10 @@ def _get_transcript(video_id: str) -> str | None:
     if not _TRANSCRIPT_OK:
         return None
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        if hasattr(YouTubeTranscriptApi, "list_transcripts"):      # < 1.2
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        else:                                                       # 1.2+: instance API
+            transcript_list = YouTubeTranscriptApi().list(video_id)
         transcript      = None
 
         lang_priority = ["en", "tr", "de", "fr", "es", "it", "pt", "ru", "ja", "ko", "ar", "zh"]
@@ -159,7 +168,8 @@ def _get_transcript(video_id: str) -> str | None:
             return None
 
         fetched = transcript.fetch()
-        return " ".join(entry["text"] for entry in fetched)
+        # 1.x returns snippet objects; 0.x returned dicts
+        return " ".join(getattr(e, "text", None) or e["text"] for e in fetched)
 
     except Exception as e:
         print(f"[YouTube] ⚠️ Transcript fetch failed: {e}")
@@ -312,7 +322,7 @@ def _handle_summarize(parameters: dict, player, speak) -> str:
     if not _TRANSCRIPT_OK:
         return "youtube-transcript-api is not installed. Run: pip install youtube-transcript-api"
 
-    url = _ask_for_url("Please paste the YouTube video URL:")
+    url = parameters.get("url", "").strip() or _ask_for_url("Please paste the YouTube video URL:")
     if not url:
         return "No URL provided, sir. Summary cancelled."
     if not _is_valid_youtube_url(url):
@@ -466,7 +476,7 @@ TOOL = {
             },
             "url": {
                 "type": "STRING",
-                "description": "Video URL for get_info action"
+                "description": "Video URL for get_info or summarize"
             }
         },
         "required": []

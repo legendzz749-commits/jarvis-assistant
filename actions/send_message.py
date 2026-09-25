@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import sys
 import time
@@ -223,9 +224,11 @@ _PLATFORM_MAP = [
 
 
 def _resolve_platform(platform_str: str):
-    key = platform_str.lower().strip()
+    # Whole words only: as substrings, "ig" matched "signal" and sent Signal
+    # messages through Instagram.
+    words = set(re.findall(r"[a-z0-9]+", platform_str.lower()))
     for keywords, handler in _PLATFORM_MAP:
-        if any(k in key for k in keywords):
+        if words & keywords:
             return handler
     return lambda r, m: _desktop_send(platform_str.strip().title(), r, m)
 
