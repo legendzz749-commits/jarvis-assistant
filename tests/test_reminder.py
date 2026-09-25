@@ -1,6 +1,8 @@
 """Regression tests: every reminder keeps its own task and message."""
 from datetime import datetime, timedelta
 
+import pytest
+
 from actions import reminder as rm
 
 
@@ -45,3 +47,22 @@ def test_linux_reminder_survives_a_reboot(tmp_path, monkeypatch):
     assert "Persistent=true" in timer and "OnCalendar=2030-01-02 09:30:00" in timer
     assert f'"{script}"' in service                      # quoted: the path has a space
     assert ["systemctl", "--user", "enable", "--now", "JARVISReminder_x.timer"] in calls
+
+
+@pytest.mark.parametrize("os_name", ["windows", "mac", "linux"])
+def test_generated_script_is_valid_and_unregisters_itself(tmp_path, monkeypatch, os_name):
+    monkeypatch.setattr(rm, "_scripts_dir", lambda: tmp_path)
+    script = rm._write_notify_script("JARVISReminder_x", "Take pills 💊", os_name, 2030)
+    body = script.read_text(encoding="utf-8")
+    compile(body, str(script), "exec")
+    assert "💊" in body
+    assert {"windows": "schtasks", "mac": "launchctl", "linux": "disable"}[os_name] in body
+
+
+def test_emoji_survives_into_the_notification_argument(tmp_path, monkeypatch):
+    monkeypatch.setattr(rm, "_scripts_dir", lambda: tmp_path)
+    script = rm._write_notify_script("JARVISReminder_y", "Take pills 💊", "linux")
+    ns = {"__file__": str(tmp_path / "nothing.py")}
+    code = script.read_text(encoding="utf-8").split("notified = False")[0]
+    exec(compile(code, "s", "exec"), ns)
+    ns["message"].encode("utf-8")                       # surrogates would raise here
