@@ -848,7 +848,9 @@ class HudCanvas(QWidget):
         # Sized to the band between the top of the canvas and the status line,
         # capped by width, so it fills the HUD at any window size — including
         # fullscreen — without ever colliding with the status text below.
-        _sy_status = cy + fw * 0.40
+        # Kept inside the canvas: on a short HUD (content panel open) cy + 0.40·fw
+        # fell below the bottom edge and the status line and waveform vanished.
+        _sy_status = min(cy + fw * 0.40, H - 54)
         if self._avatar is not None and self.hud_style == "face":
             _band_t = 12.0
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
@@ -4208,7 +4210,10 @@ class MainWindow(QMainWindow):
                 f'<div style="color:{C.WHITE}; border-left:2px solid {C.PRI};'
                 f' padding-left:8px; margin-bottom:10px;">{e(summary)}</div>')
 
-        for f in (findings or []):
+        # Most serious first, as the docstring promises (stable within a level).
+        _rank = {"serious": 0, "caution": 1, "note": 2}
+        for f in sorted((x for x in findings or [] if isinstance(x, dict)),
+                        key=lambda x: _rank.get(x.get("severity"), 3)):
             key, mark = self._REVIEW_MARKS.get(f.get("severity"), ("PRI_DIM", "·"))
             colour = getattr(C, key)
             parts.append(f'<div style="margin-bottom:11px;">')

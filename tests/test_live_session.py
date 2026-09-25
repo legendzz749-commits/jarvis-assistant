@@ -76,3 +76,12 @@ def test_missing_microphone_keeps_the_session(monkeypatch):
         task.cancel()
     asyncio.run(run())
     assert any("microphone" in m.lower() for m in logs)
+
+
+def test_quiz_results_survive_sleep_and_reconnect():
+    live = _live(_wake_enabled=True, _awake=False, _loop=object(), session=None,
+                 _pending_texts=[], _last_user_speech=0.0)
+    live.ui.muted = True
+    live._on_text_command("[QUIZ_DONE] topic=history | auto-marked 4/5 correct")
+    assert live._awake is True
+    assert live._pending_texts == ["[QUIZ_DONE] topic=history | auto-marked 4/5 correct"]

@@ -49,3 +49,15 @@ def test_desktop_exec_quotes_paths_with_spaces():
     line = ui._desktop_exec("/usr/bin/python3", "/home/me/My Projects/jarvis/main.py")
     assert shlex.split(line) == ["/usr/bin/python3", "/home/me/My Projects/jarvis/main.py"]
     assert "%%" in ui._desktop_exec("/tmp/100%/main.py")
+
+
+def test_review_findings_are_ordered_by_severity(jarvis_ui, pump):
+    win = jarvis_ui._win
+    win._show_review("Lease", "ok", [
+        {"severity": "note", "heading": "NOTE-ITEM"},
+        {"severity": "serious", "heading": "SERIOUS-ITEM"},
+        {"severity": "caution", "heading": "CAUTION-ITEM"}], [])
+    pump(20)
+    html = win._content_display.toPlainText()
+    order = [html.find(k) for k in ("SERIOUS-ITEM", "CAUTION-ITEM", "NOTE-ITEM")]
+    assert -1 not in order and order == sorted(order)

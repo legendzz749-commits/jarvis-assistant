@@ -561,6 +561,7 @@ class JarvisLive:
         self._visemes              = VisemeStream()
         self._last_out_logged      = ""      # de-dupes a re-sent transcript tail
         self._connected_once       = False   # only the first connect starts asleep (wake word)
+        self._pending_texts: list[str] = []  # user results that arrived with no session
         # Push-to-talk
         self._ptt_enabled          = False
         self._ptt_held             = False
@@ -842,12 +843,23 @@ class JarvisLive:
         return url, key, f"{url}/auto-login?key={key}", manual
 
     def _on_text_command(self, text: str):
-        if not self._loop or not self.session:
+        if not self._loop:
+            return
+        if not self.session and not text.startswith("[QUIZ_DONE]"):
             return
         # Respect wake-word sleep: a typed command must not be answered while
         # asleep either (the sleep gate is not just for the mic). Wake first with
         # "Hey Jarvis" or the WAKE NOW button.
-        if self._wake_enabled and not self._awake:
+        if text.startswith("[QUIZ_DONE]"):
+            # The user finished a quiz on screen — that is an explicit action,
+            # and the results must not be thrown away because JARVIS dozed off
+            # or was reconnecting during it.
+            if self._wake_enabled and not self._awake:
+                self.wake(reason="quiz finished")
+            if not self.session:
+                self._pending_texts = (self._pending_texts + [text])[-3:]
+                return
+        elif self._wake_enabled and not self._awake:
             self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
             return
         self._last_out_logged = ""        # a new exchange: an identical answer is not a repeat
@@ -2172,6 +2184,10 @@ class JarvisLive:
                         self.ui.write_log("SYS: JARVIS online.")
 
                     self._connected_once = True
+                    for text in self._pending_texts:     # e.g. quiz results sent while reconnecting
+                        await session.send_client_content(
+                            turns={"role": "user", "parts": [{"text": text}]}, turn_complete=True)
+                    self._pending_texts = []
 
                     if self._dashboard:
                         await self._dashboard.broadcast({"type": "status", "state": "active"})
