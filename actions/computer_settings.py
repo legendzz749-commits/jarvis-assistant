@@ -412,8 +412,14 @@ def reload_page_n(n: int):
         time.sleep(0.8)
 
 
-def scroll_up(amount: int = 500):    pyautogui.scroll(amount)
-def scroll_down(amount: int = 500):  pyautogui.scroll(-amount)
+def _wheel(notches: int) -> int:
+    """pyautogui.scroll counts wheel notches on macOS/X11 but 1/120 of a notch
+    on Windows, so the old fixed 500 was ~4 notches there and 500 elsewhere."""
+    notches = max(1, min(50, int(notches)))
+    return notches * 120 if _OS == "Windows" else notches
+
+def scroll_up(amount: int = 5):    pyautogui.scroll(_wheel(amount))
+def scroll_down(amount: int = 5):  pyautogui.scroll(-_wheel(amount))
 
 def scroll_top():
     if _OS == "Darwin": pyautogui.hotkey("command", "up")
@@ -575,6 +581,46 @@ def dark_mode():
             )
         except Exception as e:
             print(f"[Settings] dark_mode Linux failed: {e}")
+
+def _theme_state():
+    """The exact current theme settings, so undo can put them back. Toggling
+    again is not an undo: on Windows the two registry values often differ, and
+    GNOME's 'prefer-light' became 'default'."""
+    try:
+        if _OS == "Darwin":
+            r = subprocess.run(["osascript", "-e", 'tell app "System Events" to tell '
+                                'appearance preferences to get dark mode'],
+                               capture_output=True, text=True, timeout=5)
+            return {"true": True, "false": False}.get(r.stdout.strip())
+        if _OS == "Windows":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+                return (winreg.QueryValueEx(k, "AppsUseLightTheme")[0],
+                        winreg.QueryValueEx(k, "SystemUsesLightTheme")[0])
+        r = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def _restore_theme(state) -> str:
+    if _OS == "Darwin":
+        subprocess.run(["osascript", "-e", 'tell app "System Events" to tell appearance '
+                        f'preferences to set dark mode to {str(state).lower()}'], capture_output=True)
+    elif _OS == "Windows":
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                            0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, "AppsUseLightTheme", 0, winreg.REG_DWORD, state[0])
+            winreg.SetValueEx(k, "SystemUsesLightTheme", 0, winreg.REG_DWORD, state[1])
+    else:
+        subprocess.run(["gsettings", "set", "org.gnome.desktop.interface", "color-scheme",
+                        state.strip("'")], capture_output=True)
+    return "Theme restored."
+
 
 def toggle_wifi():
     if _OS == "Darwin":
@@ -904,11 +950,11 @@ def computer_settings(
             return f"Reload failed: {e}"
 
     if action == "scroll_up":
-        scroll_up(int(value or 500))
+        scroll_up(int(value or 5))
         return "Scrolled up."
 
     if action == "scroll_down":
-        scroll_down(int(value or 500))
+        scroll_down(int(value or 5))
         return "Scrolled down."
 
     func = ACTION_MAP.get(action)
@@ -927,6 +973,8 @@ def computer_settings(
         _before = ("mute", _mute_get())
     elif action in ("brightness_up", "brightness_down"):
         _before = ("brightness", brightness_get())
+    elif action == "dark_mode":
+        _before = ("theme", _theme_state())
 
     try:
         func()
@@ -946,10 +994,8 @@ def computer_settings(
             elif kind == "brightness":
                 push_undo(f"brightness ({action})",
                           lambda b=old: (brightness_set(b), f"Brightness back to {b}%.")[1])
-    elif action == "dark_mode":
-        # A pure toggle: calling it again is the undo.
-        push_undo("dark mode toggled",
-                  lambda: (dark_mode(), "Theme switched back.")[1])
+            elif kind == "theme":
+                push_undo("dark mode toggled", lambda t=old: _restore_theme(t))
 
     return f"Done: {action}."
 

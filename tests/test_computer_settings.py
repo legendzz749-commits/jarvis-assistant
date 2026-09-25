@@ -161,3 +161,48 @@ def test_non_ascii_text_is_pasted_not_dropped(monkeypatch):
 @pytest.mark.parametrize("typo,action", [("fullscren", "full_screen"), ("volumeup", "volume_up")])
 def test_typos_still_resolve(typo, action):
     assert cs.ACTION_MAP[cs._detect_action(typo)["action"]] is cs.ACTION_MAP[action]
+
+
+@pytest.mark.parametrize("os_name,expected", [("Windows", 600), ("Linux", 5), ("Darwin", 5)])
+def test_scroll_moves_the_same_number_of_notches_on_every_os(monkeypatch, os_name, expected):
+    scrolled = []
+    monkeypatch.setattr(cs, "_OS", os_name)
+    monkeypatch.setattr(cs.pyautogui, "scroll", scrolled.append)
+    cs.computer_settings({"action": "scroll_down"})
+    assert scrolled == [-expected]
+
+
+def test_dark_mode_undo_restores_the_exact_previous_scheme(monkeypatch):
+    from core import undo
+    undo.clear()
+    scheme = {"v": "'prefer-light'"}
+    monkeypatch.setattr(cs, "_OS", "Linux")
+
+    def fake_run(argv, **k):
+        if argv[:2] == ["gsettings", "get"]:
+            return types.SimpleNamespace(stdout=scheme["v"] + "\n", returncode=0)
+        if argv[:2] == ["gsettings", "set"]:
+            scheme["v"] = argv[-1] if argv[-1].startswith("'") else f"'{argv[-1]}'"
+        return types.SimpleNamespace(stdout="", returncode=0)
+    monkeypatch.setattr(cs.subprocess, "run", fake_run)
+
+    cs.computer_settings({"action": "dark_mode"})
+    assert scheme["v"] == "'prefer-dark'"
+    undo.undo_last()
+    assert scheme["v"] == "'prefer-light'"
+
+
+def test_screen_find_sends_logical_size_on_retina(monkeypatch):
+    from PIL import Image
+    from actions import computer_control as cc
+    from core import gemini
+    sent = []
+    monkeypatch.setattr(cc, "_get_api_key", lambda: "test-key")
+    monkeypatch.setattr(cc.pyautogui, "size", lambda: (1440, 900))
+    monkeypatch.setattr(cc.pyautogui, "screenshot", lambda: Image.new("RGB", (2880, 1800)))
+    def fake_call(contents, **k):
+        sent.append(Image.open(__import__("io").BytesIO(contents[0].inline_data.data)).size)
+        return types.SimpleNamespace(text="700,450")
+    monkeypatch.setattr(gemini, "call", fake_call)
+    assert cc._screen_find("the OK button") == (700, 450)
+    assert sent == [(1440, 900)]

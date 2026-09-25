@@ -216,7 +216,9 @@ def _press(key: str) -> str:
 def _scroll(direction: str = "down", amount: int = 3) -> str:
     _require_pyautogui()
     vertical   = direction in ("up", "down")
-    clicks     = amount if direction in ("up", "right") else -amount
+    # pyautogui counts 1/120 notch on Windows but whole notches elsewhere
+    notches    = amount * 120 if _get_os() == "windows" else amount
+    clicks     = notches if direction in ("up", "right") else -notches
     pyautogui.scroll(clicks) if vertical else pyautogui.hscroll(clicks)
     return f"Scrolled {direction} ×{amount}"
 
@@ -348,6 +350,10 @@ def _screen_find(description: str) -> tuple[int, int] | None:
         _require_pyautogui()
         w, h  = pyautogui.size()
         img   = pyautogui.screenshot()
+        if img.size != (w, h):
+            # Retina/HiDPI: the capture is in physical pixels (2w×2h) while
+            # clicks are in logical points. Send what the prompt describes.
+            img = img.resize((w, h))
         buf   = io.BytesIO()
         img.save(buf, format="PNG")
         image_bytes = buf.getvalue()
@@ -373,7 +379,9 @@ def _screen_find(description: str) -> tuple[int, int] | None:
 
         match = re.search(r"(\d+)\s*,\s*(\d+)", text)
         if match:
-            return int(match.group(1)), int(match.group(2))
+            x, y = int(match.group(1)), int(match.group(2))
+            if 0 <= x < w and 0 <= y < h:
+                return x, y
 
     except Exception as e:
         print(f"[ComputerControl] ⚠️ screen_find failed: {e}")
