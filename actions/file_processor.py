@@ -27,6 +27,7 @@ from datetime import datetime
 
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
 from core import gemini
+from google.genai import types
 
 def _get_api_key() -> str:
     config_path = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
@@ -108,7 +109,11 @@ def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
             if params.get("instruction"):
                 prompt = params["instruction"]
 
-            response = model.generate_content([prompt, img])
+            # A raw PIL image is not a google-genai Part: the Live rung drops it
+            # silently and answers the prompt without ever seeing the picture.
+            part = types.Part.from_bytes(data=path.read_bytes(),
+                                         mime_type=Image.MIME.get(img.format, "image/png"))
+            response = model.generate_content([prompt, part])
             result   = response.text.strip()
 
             if len(result) > 500 and params.get("save", True):
@@ -328,7 +333,8 @@ def _process_data(path: Path, file_type: str, action: str,
 
     try:
         if file_type == "csv":
-            df = pd.read_csv(path, encoding="utf-8", errors="replace")
+            df = pd.read_csv(path, encoding="utf-8", encoding_errors="replace",
+                             sep="\t" if path.suffix.lower() == ".tsv" else ",")
         else:
             df = pd.read_excel(path)
     except Exception as e:
@@ -538,13 +544,13 @@ def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
             model   = _gemini_client()
             content = path.read_bytes()
             mime    = {
-                "mp3": "audio/mp3", "wav": "audio/wav",
+                "mp3": "audio/mpeg", "wav": "audio/wav",
                 "ogg": "audio/ogg", "m4a": "audio/mp4",
                 "aac": "audio/aac", "flac": "audio/flac",
             }.get(path.suffix.lstrip(".").lower(), "audio/mpeg")
             response = model.generate_content([
                 "Transcribe all speech in this audio file accurately.",
-                {"mime_type": mime, "data": content}
+                types.Part.from_bytes(data=content, mime_type=mime),
             ])
             result = response.text.strip()
             if params.get("save", True):
