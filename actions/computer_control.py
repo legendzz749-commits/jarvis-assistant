@@ -330,6 +330,8 @@ def _focus_window(title: str) -> str:
                 ["xdotool", "search", "--name", title, "windowactivate"],
                 capture_output=True, timeout=5,
             )
+            if result.returncode != 0:      # no window matched
+                return f"No window matching '{title}' found."
             time.sleep(0.3)
             return f"Focused window: {title}"
         except FileNotFoundError:

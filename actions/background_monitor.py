@@ -21,8 +21,12 @@ _BLOCKED = {
 }
 
 def _is_blocked(topic: str) -> bool:
-    t = topic.lower()
-    return any(word in t for word in _BLOCKED)
+    # Whole words: as substrings "crypto" rejected "cryptography", "token"
+    # rejected "tokens of appreciation" topics and so on. Scripts without word
+    # breaks (Japanese) still match as substrings.
+    words = set(re.findall(r"\w+", topic.casefold()))
+    return bool(words & {w.casefold() for w in _BLOCKED}) or any(
+        not w.isascii() and w in topic for w in _BLOCKED)
 
 
 # ── Slug / hash helpers ────────────────────────────────────────────────────────

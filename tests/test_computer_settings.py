@@ -212,3 +212,14 @@ def test_random_password_is_not_logged(capsys):
     from actions import computer_control as cc
     pw = cc.computer_control({"action": "random_data", "type": "password"})
     assert len(pw) == 12 and pw not in capsys.readouterr().out
+
+
+def test_linux_focus_reports_when_no_window_matched(monkeypatch):
+    from actions import computer_control as cc
+    monkeypatch.setattr(cc, "_get_os", lambda: "linux")
+    def run(argv, **k):
+        if argv[0] == "wmctrl":
+            raise FileNotFoundError
+        return types.SimpleNamespace(returncode=1)
+    monkeypatch.setattr(cc.subprocess, "run", run)
+    assert "No window" in cc._focus_window("Nonexistent")

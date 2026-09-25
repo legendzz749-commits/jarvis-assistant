@@ -104,3 +104,20 @@ def test_check_does_not_resurrect_a_monitor_removed_meanwhile(monkeypatch):
 
     bm.check_all()
     assert "f1" not in saved
+
+
+def test_blocked_topics_match_whole_words():
+    assert bm._is_blocked("bitcoin price") and bm._is_blocked("仮想通貨ニュース")
+    assert not bm._is_blocked("cryptography research") and not bm._is_blocked("Kryptonite")
+
+
+def test_gemini_failure_is_not_executed_as_code():
+    out = desktop._confirm_and_execute("tidy", "ERROR: every Gemini model on the ladder failed")
+    assert "Could not work out" in out
+
+
+def test_desktop_ini_is_left_alone_on_windows(desk, monkeypatch):
+    monkeypatch.setattr(desktop, "_OS", "Windows")
+    (desk / "desktop.ini").write_text("[.ShellClassInfo]")
+    desktop.organize_desktop()
+    assert (desk / "desktop.ini").exists()

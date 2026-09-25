@@ -82,6 +82,12 @@ def _confirm_and_execute(task: str, code: str, player=None) -> str:
     """Model-written code cannot be sandboxed in-process — os is reachable
     through os.path and Path can delete — so it only runs after the user reads
     it on the HUD and presses CONFIRM."""
+    if code.startswith("ERROR:"):
+        # A failed Gemini call, not code — it used to be exec'd and reported
+        # as "invalid syntax".
+        return f"Could not work out how to do that: {code[6:].strip()}"
+    if code.strip() == "UNSAFE":
+        return "That desktop task cannot be done safely with the tools I have."
     from core import confirm
     if confirm.pending_title():
         return ("There is already a confirmation waiting on screen. "
@@ -320,7 +326,7 @@ FILE_TYPE_MAP = {
 }
 
 _SKIP_EXTENSIONS = {
-    "Windows": {".lnk", ".url"},
+    "Windows": {".lnk", ".url", ".ini"},   # desktop.ini is a hidden system file
     "Darwin":  {".webloc"},
     "Linux":   {".desktop"},
 }

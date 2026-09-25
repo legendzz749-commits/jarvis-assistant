@@ -140,8 +140,9 @@ def _detect_camera_index() -> int:
             return idx
         print(f"[Vision] ⚠️  Camera index {idx}: no usable frame")
 
+    # Not cached: saving 0 here meant detection never ran again, even after a
+    # camera was plugged in.
     print("[Vision] ⚠️  No camera found — defaulting to index 0")
-    _save_config_key("camera_index", 0)
     return 0
 
 
