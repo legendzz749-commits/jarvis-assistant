@@ -3956,6 +3956,11 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._ptt_btn)
 
         self._refresh_talk_btns()
+        # A saved "on" must also bind the chord. Off Windows there is no global
+        # hook, and without this the mic stays closed until PTT is re-toggled.
+        from memory.config_manager import get_push_to_talk_enabled
+        if _OS != "Windows" and get_push_to_talk_enabled():
+            self._apply_ptt_shortcut(True)
 
         self._hud_btn = QPushButton()
         self._hud_btn.setFixedHeight(26)

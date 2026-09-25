@@ -196,6 +196,12 @@ class WakeWordDetector:
                 if score >= self._threshold:
                     # drain any backlog so we don't double-fire on the same utterance
                     self._drain()
+                    # openwakeword is stateful: without a reset its buffers still
+                    # hold "hey jarvis" when feeding resumes after sleep, and the
+                    # first frame re-fires the wake.
+                    reset = getattr(self._model, "reset", None)
+                    if reset:
+                        reset()
                     try:
                         self._on_detect()
                     except Exception as e:
