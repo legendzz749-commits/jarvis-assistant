@@ -38,3 +38,40 @@ def test_summarize_uses_the_url_it_was_given(monkeypatch):
 ])
 def test_each_platform_resolves_to_its_own_handler(name, handler):
     assert send_message._resolve_platform(name) is getattr(send_message, handler)
+
+
+def test_message_is_not_typed_into_the_wrong_window(monkeypatch):
+    keys = []
+    monkeypatch.setattr(send_message, "_open_app", lambda _name: True)
+    monkeypatch.setattr(send_message, "_focused_window_title", lambda: "notes.txt - Visual Studio Code")
+    monkeypatch.setattr(send_message.pyautogui, "press", lambda *a: keys.append(a))
+    monkeypatch.setattr(send_message.pyautogui, "hotkey", lambda *a: keys.append(a))
+    monkeypatch.setattr(send_message.time, "sleep", lambda _s: None)
+
+    out = send_message._desktop_send("WhatsApp", "Mum", "on my way")
+
+    assert keys == []
+    assert "did not type" in out
+
+
+def test_linux_open_fails_when_no_desktop_entry_or_binary(monkeypatch):
+    monkeypatch.setattr(send_message, "_get_os", lambda: "linux")
+    monkeypatch.setattr(send_message.subprocess, "run",
+                        lambda argv, **k: SimpleNamespace(returncode=1))
+    # gtk-launch starts fine and then exits 1: no WhatsApp .desktop entry
+    monkeypatch.setattr(send_message.subprocess, "Popen",
+                        lambda argv, **k: SimpleNamespace(poll=lambda: 1))
+    monkeypatch.setattr(send_message.time, "sleep", lambda _s: None)
+    assert send_message._open_app("WhatsApp") is False
+
+
+def test_paste_restores_the_users_clipboard(monkeypatch):
+    board = {"v": "user's copied text"}
+    monkeypatch.setattr(send_message.pyperclip, "paste", lambda: board["v"])
+    monkeypatch.setattr(send_message.pyperclip, "copy", lambda t: board.__setitem__("v", t))
+    monkeypatch.setattr(send_message.pyautogui, "hotkey", lambda *a: None)
+    monkeypatch.setattr(send_message.time, "sleep", lambda _s: None)
+
+    send_message._paste_text("hello")
+
+    assert board["v"] == "user's copied text"

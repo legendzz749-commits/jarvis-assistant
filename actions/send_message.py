@@ -45,11 +45,23 @@ def _paste_text(text: str) -> None:
     os_name = _get_os()
     paste_hotkey = ("command", "v") if os_name == "mac" else ("ctrl", "v")
 
+    previous = None
+    copied = False
     if _PYPERCLIP:
-        pyperclip.copy(text)
+        try:
+            previous = pyperclip.paste()
+            pyperclip.copy(text)
+            copied = True
+        except pyperclip.PyperclipException:
+            pass           # no clipboard backend (Linux without xclip/xsel/wl-clipboard)
+    if copied:
         time.sleep(0.15)
         pyautogui.hotkey(*paste_hotkey)
-        time.sleep(0.1)
+        time.sleep(0.4)    # let the app read the clipboard before it is restored
+        try:
+            pyperclip.copy(previous or "")   # give the user back what they had copied
+        except pyperclip.PyperclipException:
+            pass
     else:
         pyautogui.write(text, interval=0.03)
 
@@ -91,28 +103,48 @@ def _open_app(app_name: str) -> bool:
             time.sleep(2.5)
             return result.returncode == 0
 
-        else: 
-            launched = False
-            for launcher in [
-                ["gtk-launch", app_name.lower()],
-                [app_name.lower()],
-            ]:
-                try:
-                    subprocess.Popen(
-                        launcher,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    launched = True
-                    break
-                except FileNotFoundError:
-                    continue
+        else:
+            # gtk-launch exits non-zero when no .desktop entry matches, and a bare
+            # binary that is not there fails to start — neither is "opened".
+            try:
+                if subprocess.run(["gtk-launch", app_name.lower()], capture_output=True,
+                                  timeout=10).returncode == 0:
+                    time.sleep(2.5)
+                    return True
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+            try:
+                proc = subprocess.Popen([app_name.lower()], stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL)
+            except FileNotFoundError:
+                return False
             time.sleep(2.5)
-            return launched
+            return proc.poll() in (None, 0)
 
     except Exception as e:
         print(f"[SendMessage] ⚠️ Could not open {app_name}: {e}")
         return False
+
+
+def _focused_window_title() -> str | None:
+    """Title of the window that will receive keystrokes, or None if this
+    platform cannot say (Linux without xdotool)."""
+    os_name = _get_os()
+    try:
+        if os_name == "windows":
+            import pygetwindow
+            win = pygetwindow.getActiveWindow()
+            return win.title if win else ""
+        if os_name == "mac":
+            r = subprocess.run(["osascript", "-e", 'tell application "System Events" to get name '
+                                'of first application process whose frontmost is true'],
+                               capture_output=True, text=True, timeout=5)
+            return r.stdout.strip() if r.returncode == 0 else None
+        r = subprocess.run(["xdotool", "getactivewindow", "getwindowname"],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        return None
 
 
 def _open_browser_url(url: str) -> bool:
@@ -138,6 +170,13 @@ def _search_in_app(query: str) -> None:
 def _desktop_send(app_name: str, receiver: str, message: str) -> str:
     if not _open_app(app_name):
         return f"Could not open {app_name}."
+    # Everything below is keystrokes into the focused window. If that is not
+    # the messenger (it failed to open, or opened behind), the search text and
+    # the message would land in whatever else is in front.
+    title = _focused_window_title()
+    if title is not None and app_name.lower() not in title.lower():
+        return (f"{app_name} did not come to the front (focused: '{title[:40]}'), "
+                f"so I did not type anything.")
 
     time.sleep(1.0)
     _search_in_app(receiver)
