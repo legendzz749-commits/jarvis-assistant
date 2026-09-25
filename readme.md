@@ -280,6 +280,8 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 ```bash
 git clone https://github.com/FatihMakes/Mark-LIV.git
 cd Mark-LIV
+python -m venv .venv   # recommended — required on Ubuntu 23.04+, Debian 12+ and Homebrew Python
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 python setup.py        # installs deps for YOUR OS + the browser automation engine
 python main.py
 ```
@@ -375,7 +377,7 @@ Mark LIV/
 
 ## 🔒 Your Data
 
-Everything stays on your machine. There is no MARK server, no telemetry and no account.
+Your files and settings stay on your machine. There is no MARK server, no telemetry and no account.
 
 | What | Where | Notes |
 |---|---|---|
@@ -385,7 +387,10 @@ Everything stays on your machine. There is no MARK server, no telemetry and no a
 
 All three are listed in `.gitignore`, so a fork or a pull request cannot leak them by accident. **If you have already committed `config/api_keys.json` anywhere public, revoke that key** at [aistudio.google.com](https://aistudio.google.com/app/apikey) and generate a new one — removing the file in a later commit does not remove it from the history.
 
-Your voice is streamed to Google's Gemini Live API while a session is open; that is the one thing that leaves your computer, and it stops when you mute or close the app.
+What does leave your computer, and where it goes:
+
+* **To Google (Gemini API):** your voice while a session is open (it stops when you mute or close the app), anything you type, and the system prompt, which includes your stored memories, your name, the assistant's name and your OS. Screen and webcam frames go too when you ask it to look, and so do file and code contents when you ask it to read, summarise or fix them.
+* **To search engines:** web search queries go to Google and DuckDuckGo. Weather lookups go to Open-Meteo.
 
 ---
 

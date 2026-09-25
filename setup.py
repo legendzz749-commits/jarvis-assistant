@@ -86,10 +86,27 @@ def _check_linux_libraries() -> None:
               "    Arch:          sudo pacman -S tk portaudio xcb-util-cursor")
 
 
+def _check_environment() -> None:
+    """Ubuntu 23.04+, Debian 12+ and Homebrew mark their Python as externally
+    managed, and pip refuses to install into it — say so instead of dying with a
+    CalledProcessError traceback."""
+    import sysconfig
+    in_venv = sys.prefix != sys.base_prefix
+    marker = Path(sysconfig.get_path("stdlib")) / "EXTERNALLY-MANAGED"
+    if not in_venv and marker.exists():
+        print("\n❌ This Python is managed by your OS, so pip cannot install into it.")
+        print("   Create a virtual environment first, then run setup with it:")
+        print(f"     {sys.executable} -m venv .venv")
+        print("     source .venv/bin/activate      (Windows: .venv\\Scripts\\activate)")
+        print("     python setup.py")
+        sys.exit(1)
+
+
 def main() -> None:
     print(f"⚙  MARK LIV setup — detected OS: {OS or 'unknown'}, "
           f"Python {sys.version_info[0]}.{sys.version_info[1]}")
     _check_python()
+    _check_environment()
 
     # requirements.txt filters OS-specific extras by itself via pip markers.
     _run("Installing Python dependencies (OS-specific extras auto-filtered)…",

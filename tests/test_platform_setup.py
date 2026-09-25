@@ -48,3 +48,16 @@ def test_linux_setup_names_the_missing_system_libraries(monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "python3-tk libportaudio2 libxcb-cursor0" in out
+
+
+def test_setup_explains_an_externally_managed_python(tmp_path, monkeypatch, capsys):
+    import sysconfig
+
+    import pytest
+    import setup
+    (tmp_path / "EXTERNALLY-MANAGED").write_text("[externally-managed]")
+    monkeypatch.setattr(sysconfig, "get_path", lambda name: str(tmp_path))
+    monkeypatch.setattr(sys, "prefix", sys.base_prefix)            # not in a venv
+    with pytest.raises(SystemExit):
+        setup._check_environment()
+    assert "venv" in capsys.readouterr().out

@@ -55,6 +55,7 @@ tinytuya
 comtypes;   sys_platform == "win32"
 pycaw;      sys_platform == "win32"
 win10toast; sys_platform == "win32"
+setuptools<81; sys_platform == "win32"   # win10toast imports pkg_resources, removed in setuptools 81+
 pywinauto;  sys_platform == "win32"
 pywin32;    sys_platform == "win32"
 wmi;        sys_platform == "win32"
