@@ -4172,11 +4172,23 @@ class MainWindow(QMainWindow):
         self._content_display.moveCursor(
             self._content_display.textCursor().MoveOperation.Start
         )
-        first_show = not self._content_panel.isVisible()
-        self._content_panel.show()
-        if first_show:
-            total = self._center_split.height()
-            self._center_split.setSizes([max(total - 220, 120), 220])
+        self._reveal_panel(1, 220)
+
+    def _reveal_panel(self, idx: int, want: int) -> None:
+        """Show the content (1) or quiz (2) panel under the HUD. Each used to set
+        the OTHER panel to 0 px, and "first show" was judged by isVisible(), so
+        a squashed panel stayed visible-but-0-px for good."""
+        panels = {1: self._content_panel, 2: self._quiz_panel}
+        panels[idx].show()
+        sizes = self._center_split.sizes()
+        total = sum(sizes) or self._center_split.height()
+        for i, panel in panels.items():
+            if not panel.isVisible():
+                sizes[i] = 0
+            elif sizes[i] < 60:
+                sizes[i] = want if i == idx else 200
+        sizes[0] = max(total - sizes[1] - sizes[2], 120)
+        self._center_split.setSizes(sizes)
 
     # ── document review ──────────────────────────────────────────────────────
     # Rendered as rich text into the content panel that already exists, rather
@@ -4260,11 +4272,7 @@ class MainWindow(QMainWindow):
         self._content_display.setHtml("".join(parts))
         self._content_display.moveCursor(
             self._content_display.textCursor().MoveOperation.Start)
-        first_show = not self._content_panel.isVisible()
-        self._content_panel.show()
-        if first_show:
-            total = self._center_split.height()
-            self._center_split.setSizes([max(total - 260, 120), 260, 0])
+        self._reveal_panel(1, 260)
 
     # ── quiz panel ───────────────────────────────────────────────────────────
     # An interactive twin of the content panel. The plugin only ever hands over
@@ -4393,11 +4401,7 @@ class MainWindow(QMainWindow):
         }
         self._quiz_title_lbl.setText((topic or "quiz").upper()[:48])
         self.hud.glance(0.0, -0.85, hold=1.3)
-        first_show = not self._quiz_panel.isVisible()
-        self._quiz_panel.show()
-        if first_show:
-            total = self._center_split.height()
-            self._center_split.setSizes([max(total - 250, 120), 0, 250])
+        self._reveal_panel(2, 250)
         self._quiz_render()
 
     def _hide_quiz(self):

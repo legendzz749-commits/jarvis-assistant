@@ -61,3 +61,16 @@ def test_review_findings_are_ordered_by_severity(jarvis_ui, pump):
     html = win._content_display.toPlainText()
     order = [html.find(k) for k in ("SERIOUS-ITEM", "CAUTION-ITEM", "NOTE-ITEM")]
     assert -1 not in order and order == sorted(order)
+
+
+def test_quiz_and_review_panels_do_not_squash_each_other(jarvis_ui, pump):
+    win = jarvis_ui._win
+    win.resize(1100, 900)
+    pump(50)
+    win._show_quiz("history", [{"type": "short", "question": "Year of the moon landing?",
+                                "answer": "1969"}], None)
+    pump(20)
+    win._show_review("Lease", "ok", [{"severity": "note", "heading": "x"}], [])
+    pump(20)
+    _hud, content, quiz = win._center_split.sizes()
+    assert content > 0 and quiz > 0, win._center_split.sizes()
