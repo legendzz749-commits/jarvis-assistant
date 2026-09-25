@@ -78,6 +78,9 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
+_GROUNDED_BUDGET_S = 15.0
+
+
 def _gemini_search(query: str) -> str:
     if not _gemini_available():
         raise _QuotaCooldown("Gemini grounding is in quota cooldown")
@@ -87,10 +90,18 @@ def _gemini_search(query: str) -> str:
     # Grounded search reads a live page, so it gets a longer deadline than the
     # default — but it still HAS one, and it still walks the fallback ladder.
     try:
-        response = gemini.call(query, tier=gemini.SEARCH,
-                               config={"tools": [{"google_search": {}}]},
-                               timeout_ms=30_000)
+        # One overall budget: three rungs × 30 s used to hold the tool call for
+        # ~90 s before the DDG fallback even started.
+        response = _run_bounded(
+            lambda: gemini.call(query, tier=gemini.SEARCH,
+                                config={"tools": [{"google_search": {}}]},
+                                timeout_ms=12_000),
+            timeout=_GROUNDED_BUDGET_S, label="Gemini search")
         if response is None:
+            # gemini.call swallows the 429 and returns None, so the breaker
+            # never saw it; every rung cooling down is the same signal.
+            if all(gemini._cooling(m) for m in gemini._LADDERS[gemini.SEARCH]):
+                raise RuntimeError("429 RESOURCE_EXHAUSTED on every grounded model")
             raise RuntimeError("every Gemini model on the ladder failed")
     except Exception as e:
         _note_gemini_error(e)

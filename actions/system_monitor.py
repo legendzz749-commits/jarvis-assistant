@@ -151,9 +151,21 @@ class SystemMonitor:
     def _record(self, key: str):
         self._last_alert[key] = time.monotonic()
 
+    def _cpu_since_last(self) -> float:
+        """CPU % since the previous check. psutil's cpu_percent(interval=None)
+        keeps its baseline per thread, and check() runs on whichever executor
+        thread is free — so it compared against the wrong baseline or none."""
+        now = psutil.cpu_times()
+        prev, self._cpu_times = getattr(self, "_cpu_times", None), now
+        if prev is None:
+            return 0.0
+        busy = sum(now) - now.idle - (sum(prev) - prev.idle)
+        total = sum(now) - sum(prev)
+        return 100.0 * busy / total if total > 0 else 0.0
+
     def check(self) -> str | None:
         try:
-            cpu  = psutil.cpu_percent(interval=None)
+            cpu  = self._cpu_since_last()
             ram  = psutil.virtual_memory().percent
             temp = _get_cpu_temp()
             gpu  = _get_gpu_usage()
