@@ -21,6 +21,7 @@ import re
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from datetime import datetime
@@ -192,13 +193,17 @@ def _process_pdf(path: Path, action: str, params: dict, speak=None) -> str:
             with pdfplumber.open(path) as pdf:
                 for page in pdf.pages:
                     text += (page.extract_text() or "") + "\n"
+                    if len(text) >= max_chars:
+                        break
         except ImportError:
             try:
                 import PyPDF2
                 with open(path, "rb") as f:
                     reader = PyPDF2.PdfReader(f)
                     for page in reader.pages:
-                        text += page.extract_text() + "\n"
+                        text += (page.extract_text() or "") + "\n"
+                        if len(text) >= max_chars:
+                            break
             except ImportError:
                 return ""
         return text[:max_chars]
@@ -270,13 +275,17 @@ def _process_text_doc(path: Path, file_type: str, action: str,
                 doc  = Document(path)
                 return "\n".join(p.text for p in doc.paragraphs)
             except ImportError:
-                return "python-docx not installed."
+                raise ValueError("python-docx is not installed (pip install python-docx).") from None
             except Exception as e:
-                return f"Read failed: {e}"
+                raise ValueError(f"Could not read this document ({e}). Legacy .doc files "
+                                 f"are not supported — save it as .docx.") from e
         else:
             return path.read_text(encoding="utf-8", errors="ignore")
 
-    content = _read_content()
+    try:
+        content = _read_content()
+    except ValueError as e:
+        return str(e)
     if not content.strip():
         return "File appears to be empty."
 
@@ -305,9 +314,9 @@ def _process_text_doc(path: Path, file_type: str, action: str,
     }
 
     if action not in prompt_map:
-
-        action  = "custom"
-        instruction = action
+        # "make it formal", "list the dates"… the action IS the instruction
+        prompt_map["custom"] = f"{instruction or action}\n\n{content[:40000]}"
+        action = "custom"
 
     try:
         model    = _gemini_client()
@@ -388,7 +397,11 @@ def _process_data(path: Path, file_type: str, action: str,
         if not col or col not in df.columns:
             return f"Column '{col}' not found. Available: {', '.join(df.columns)}"
         try:
-            if condition == "equals":     filtered = df[df[col] == value]
+            if condition == "equals":
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    filtered = df[df[col] == float(value)]
+                else:
+                    filtered = df[df[col].astype(str) == str(value)]
             elif condition == "contains": filtered = df[df[col].astype(str).str.contains(str(value), case=False)]
             elif condition == "gt":       filtered = df[df[col] > float(value)]
             elif condition == "lt":       filtered = df[df[col] < float(value)]
@@ -404,8 +417,12 @@ def _process_data(path: Path, file_type: str, action: str,
         asc = params.get("ascending", True)
         try:
             sorted_df = df.sort_values(col, ascending=asc)
-            out = _output_path(path, "sorted", path.suffix)
-            sorted_df.to_csv(out, index=False)
+            if file_type == "csv":
+                out = _output_path(path, "sorted", path.suffix)
+                sorted_df.to_csv(out, index=False, sep="\t" if path.suffix.lower() == ".tsv" else ",")
+            else:
+                out = _output_path(path, "sorted", ".xlsx")
+                sorted_df.to_excel(out, index=False)
             return f"Sorted by '{col}'. Saved: {out.name}"
         except Exception as e:
             return f"Sort failed: {e}"
@@ -472,7 +489,7 @@ def _process_code(path: Path, action: str, params: dict, speak=None) -> str:
         if ext == "py":
             try:
                 result = subprocess.run(
-                    ["python", str(path)],
+                    [sys.executable, str(path)],
                     capture_output=True, text=True, timeout=30
                 )
                 out = result.stdout or result.stderr
@@ -631,7 +648,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
         try:
             subprocess.run(
                 ["ffmpeg", "-i", str(path), "-q:a", "0", "-map", "a", str(out), "-y"],
-                capture_output=True, timeout=300
+                capture_output=True, timeout=300, check=True
             )
             return f"Audio extracted. Saved: {out.name}"
         except Exception as e:
@@ -648,7 +665,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             if end:
                 cmd += ["-to", str(end)]
             cmd += ["-c", "copy", str(out), "-y"]
-            subprocess.run(cmd, capture_output=True, timeout=600)
+            subprocess.run(cmd, capture_output=True, timeout=600, check=True)
             return f"Trimmed video saved: {out.name}"
         except Exception as e:
             return f"Trim failed: {e}"
@@ -662,14 +679,16 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             subprocess.run(
                 ["ffmpeg", "-i", str(path), "-ss", timestamp,
                  "-vframes", "1", str(out), "-y"],
-                capture_output=True, timeout=30
+                capture_output=True, timeout=30, check=True
             )
             return f"Frame extracted at {timestamp}. Saved: {out.name}"
         except Exception as e:
             return f"Extract frame failed: {e}"
 
     if action == "compress":
-        crf = int(params.get("quality", 28))  
+        # "quality" means 0-100 (higher = better) everywhere else; x264's CRF
+        # runs the other way (0 best … 51 worst). 70 maps to the old default 28.
+        crf = int(round(51 - 0.33 * max(0, min(100, int(params.get("quality", 70))))))
         if not _ffmpeg_available():
             return "ffmpeg not found."
         out = _output_path(path, f"compressed_crf{crf}", ".mp4")
@@ -679,7 +698,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
                  "-c:v", "libx264", "-crf", str(crf),
                  "-preset", "medium", "-c:a", "copy",
                  str(out), "-y"],
-                capture_output=True, timeout=1800
+                capture_output=True, timeout=1800, check=True
             )
             before = _file_size_str(path)
             after  = _file_size_str(out)
@@ -695,7 +714,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             subprocess.run(
                 ["ffmpeg", "-i", str(path), "-q:a", "0", "-map", "a",
                  str(tmp_audio), "-y"],
-                capture_output=True, timeout=300
+                capture_output=True, timeout=300, check=True
             )
             result = _process_audio(tmp_audio, "transcribe", params, speak)
             return result
@@ -713,7 +732,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
         try:
             subprocess.run(
                 ["ffmpeg", "-i", str(path), str(out), "-y"],
-                capture_output=True, timeout=1800
+                capture_output=True, timeout=1800, check=True
             )
             return f"Converted to {fmt.upper()}. Saved: {out.name}"
         except Exception as e:
@@ -797,7 +816,7 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
     if not file_path_str:
         return "No file path provided."
 
-    path = Path(file_path_str)
+    path = Path(file_path_str).expanduser()
     if not path.exists():
         return f"File not found: {file_path_str}"
     if not path.is_file():
@@ -831,7 +850,7 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
         "csv":     lambda p, a, pm, s: _process_data(p, "csv",   a, pm, s),
         "excel":   lambda p, a, pm, s: _process_data(p, "excel", a, pm, s),
         "json":    _process_json,
-        "xml":     lambda p, a, pm, s: _process_json(p, a, pm, s),  
+        "xml":     lambda p, a, pm, s: _process_text_doc(p, "text", a, pm, s),  
         "code":    _process_code,
         "audio":   _process_audio,
         "video":   _process_video,
