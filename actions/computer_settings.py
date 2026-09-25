@@ -80,15 +80,43 @@ def volume_down():
         subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", "-10%"],
             capture_output=True)
 
-def volume_mute():
+def _set_mute(muted: bool | None):
+    """True = mute, False = unmute, None = toggle."""
     if _OS == "Windows":
-        pyautogui.press("volumemute")
+        try:
+            vol = _win_endpoint_volume()
+            vol.SetMute(int(not vol.GetMute()) if muted is None else int(muted), None)
+        except Exception:
+            pyautogui.press("volumemute")     # toggle is the only thing a key can do
     elif _OS == "Darwin":
-        subprocess.run(["osascript", "-e", "set volume with output muted"],
-            capture_output=True)
+        script = ("set volume output muted not (output muted of (get volume settings))"
+                  if muted is None else
+                  f"set volume {'with' if muted else 'without'} output muted")
+        subprocess.run(["osascript", "-e", script], capture_output=True)
     else:
-        subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"],
+        state = "toggle" if muted is None else ("1" if muted else "0")
+        subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", state],
             capture_output=True)
+
+def volume_mute():        _set_mute(True)
+def volume_unmute():      _set_mute(False)
+def volume_toggle_mute(): _set_mute(None)
+
+
+def _win_endpoint_volume():
+    """IAudioEndpointVolume for the default speakers, on old and new pycaw.
+
+    pycaw >= 20251023 returns a wrapper from GetSpeakers() with no Activate();
+    its volume interface is the EndpointVolume property instead."""
+    from ctypes import cast, POINTER
+    from comtypes import CLSCTX_ALL, CoInitialize
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+    CoInitialize()      # tools run on executor threads that never initialised COM
+    speakers = AudioUtilities.GetSpeakers()
+    if hasattr(speakers, "EndpointVolume"):
+        return speakers.EndpointVolume
+    interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+    return cast(interface, POINTER(IAudioEndpointVolume))
 
 def volume_get() -> int | None:
     """Current master volume 0-100, or None if this platform will not say.
@@ -98,17 +126,8 @@ def volume_get() -> int | None:
     undoable — a wrong undo is worse than no undo."""
     try:
         if _OS == "Windows":
-            import math
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-            devices   = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol       = cast(interface, POINTER(IAudioEndpointVolume))
-            db        = vol.GetMasterVolumeLevel()
-            if db <= -65.0:
-                return 0
-            return max(0, min(100, round(10 ** (db / 20) * 100)))
+            level = _win_endpoint_volume().GetMasterVolumeLevelScalar()
+            return max(0, min(100, round(level * 100)))
         if _OS == "Darwin":
             r = subprocess.run(["osascript", "-e", "output volume of (get volume settings)"],
                                capture_output=True, text=True, timeout=5)
@@ -163,20 +182,11 @@ def volume_set(value: int):
     value = max(0, min(100, int(value)))
     if _OS == "Windows":
         try:
-            import math
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-            devices   = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol       = cast(interface, POINTER(IAudioEndpointVolume))
-            vol_db    = -65.25 if value == 0 else max(-65.25, 20 * math.log10(value / 100))
-            vol.SetMasterVolumeLevel(vol_db, None)
+            _win_endpoint_volume().SetMasterVolumeLevelScalar(value / 100, None)
             return
         except Exception as e:
-            print(f"[Settings] pycaw failed, using keypress fallback: {e}")
-            pyautogui.press("volumemute")
-            pyautogui.press("volumemute")
+            # There is no key for "set to N%"; saying it worked would be a lie.
+            raise RuntimeError(f"could not reach the Windows volume control ({e})") from e
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e", f"set volume output volume {value}"],
             capture_output=True)
@@ -273,7 +283,7 @@ def maximize_window():
             subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-b", "add,maximized_vert,maximized_horz"],
                 capture_output=True)
         except Exception:
-            pyautogui.hotkey("super", "up")
+            pyautogui.hotkey("win", "up")
 
 def snap_left():
     if _OS == "Windows":
@@ -315,7 +325,7 @@ def switch_window():
 def show_desktop():
     if _OS == "Darwin":   pyautogui.hotkey("fn", "f11")
     elif _OS == "Windows": pyautogui.hotkey("win", "d")
-    else:                  pyautogui.hotkey("super", "d")
+    else:                  pyautogui.hotkey("win", "d")
 
 def open_task_manager():
     if _OS == "Windows":
@@ -348,11 +358,11 @@ def new_tab():
     else:               pyautogui.hotkey("ctrl", "t")
 
 def next_tab():
-    if _OS == "Darwin": pyautogui.hotkey("command", "shift", "bracketright")
+    if _OS == "Darwin": pyautogui.hotkey("command", "shift", "]")
     else:               pyautogui.hotkey("ctrl", "tab")
 
 def prev_tab():
-    if _OS == "Darwin": pyautogui.hotkey("command", "shift", "bracketleft")
+    if _OS == "Darwin": pyautogui.hotkey("command", "shift", "[")
     else:               pyautogui.hotkey("ctrl", "shift", "tab")
 
 def go_back():
@@ -364,12 +374,12 @@ def go_forward():
     else:               pyautogui.hotkey("alt", "right")
 
 def zoom_in():
-    if _OS == "Darwin": pyautogui.hotkey("command", "equal")
-    else:               pyautogui.hotkey("ctrl", "equal")
+    if _OS == "Darwin": pyautogui.hotkey("command", "=")
+    else:               pyautogui.hotkey("ctrl", "=")
 
 def zoom_out():
-    if _OS == "Darwin": pyautogui.hotkey("command", "minus")
-    else:               pyautogui.hotkey("ctrl", "minus")
+    if _OS == "Darwin": pyautogui.hotkey("command", "-")
+    else:               pyautogui.hotkey("ctrl", "-")
 
 def zoom_reset():
     if _OS == "Darwin": pyautogui.hotkey("command", "0")
@@ -435,8 +445,14 @@ def press_key(key: str): pyautogui.press(key)
 def type_text(text: str, press_enter_after: bool = False):
     if not text:
         return
+    copied = False
     if _PYPERCLIP:
-        pyperclip.copy(str(text))
+        try:
+            pyperclip.copy(str(text))
+            copied = True
+        except pyperclip.PyperclipException:
+            pass          # no clipboard backend (Linux without xclip/xsel/wl-clipboard)
+    if copied:
         time.sleep(0.15)
         paste()
     else:
@@ -455,7 +471,7 @@ def take_screenshot():
             if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
                 subprocess.Popen(cmd)
                 return
-        pyautogui.hotkey("ctrl", "print_screen")
+        pyautogui.hotkey("ctrl", "printscreen")
 
 def lock_screen():
     if _OS == "Windows":
@@ -596,8 +612,8 @@ ACTION_MAP: dict[str, callable] = {
     "volume_up":           volume_up,
     "volume_down":         volume_down,
     "mute":                volume_mute,
-    "unmute":              volume_mute,
-    "toggle_mute":         volume_mute,
+    "unmute":              volume_unmute,
+    "toggle_mute":         volume_toggle_mute,
     "brightness_up":       brightness_up,
     "brightness_down":     brightness_down,
     "sleep_display":       sleep_display,

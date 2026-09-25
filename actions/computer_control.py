@@ -167,8 +167,7 @@ def _smart_type(text: str, clear_first: bool = True) -> str:
         _clear_field()
         time.sleep(0.1)
 
-    if len(text) > 20 and _PYPERCLIP:
-        pyperclip.copy(text)
+    if len(text) > 20 and _copy_to_clipboard(text):
         time.sleep(0.1)
         paste_key = "command" if _get_os() == "mac" else "ctrl"
         pyautogui.hotkey(paste_key, "v")
@@ -228,15 +227,26 @@ def _clipboard_get() -> str:
     return "(copied — pyperclip unavailable for read)"
 
 
-def _clipboard_paste(text: str) -> str:
-    if _PYPERCLIP:
+def _copy_to_clipboard(text: str) -> bool:
+    """False when there is no clipboard backend — pyperclip imports fine on
+    Linux without xclip/xsel/wl-clipboard and only fails on first use."""
+    if not _PYPERCLIP:
+        return False
+    try:
         pyperclip.copy(text)
+        return True
+    except pyperclip.PyperclipException:
+        return False
+
+
+def _clipboard_paste(text: str) -> str:
+    if _copy_to_clipboard(text):
         time.sleep(0.1)
         _require_pyautogui()
         paste_key = "command" if _get_os() == "mac" else "ctrl"
         pyautogui.hotkey(paste_key, "v")
         return f"Pasted: {text[:60]}{'…' if len(text) > 60 else ''}"
-    return "pyperclip not available"
+    return "No clipboard available (on Linux install xclip, xsel or wl-clipboard)."
 
 
 def _screenshot(save_path: str | None = None) -> str:
