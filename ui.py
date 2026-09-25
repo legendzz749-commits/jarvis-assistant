@@ -52,7 +52,7 @@ API_FILE   = CONFIG_DIR / "api_keys.json"
 def _read_full_config() -> dict:
     """Read api_keys.json config dict. Returns {} on any error."""
     try:
-        return json.loads(API_FILE.read_text(encoding="utf-8"))
+        return json.loads(API_FILE.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
 
@@ -5002,12 +5002,11 @@ class MainWindow(QMainWindow):
                 voice_changed = True
 
         try:
-            data = _read_full_config()
-            data["assistant_name"] = self._assistant_name
-            data["user_name"] = user_name.strip()
+            from memory.config_manager import _patch_config
+            fields = {"assistant_name": self._assistant_name, "user_name": user_name.strip()}
             if ui_color:
-                data["ui_color"] = ui_color.strip().lower()
-            API_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+                fields["ui_color"] = ui_color.strip().lower()
+            _patch_config(**fields)
             self._log.append_log(f"SYS: Identity updated — {display}")
             if color_changed:
                 self._log.append_log(f"SYS: UI colour applied — {ui_color}")
@@ -5185,7 +5184,7 @@ class MainWindow(QMainWindow):
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False
         try:
-            d = json.loads(API_FILE.read_text(encoding="utf-8"))
+            d = json.loads(API_FILE.read_text(encoding="utf-8-sig"))
             return bool(d.get("gemini_api_key")) and bool(d.get("os_system"))
         except Exception:
             return False
@@ -5204,12 +5203,10 @@ class MainWindow(QMainWindow):
         self._overlay = ov
 
     def _on_setup_done(self, key: str, os_name: str):
-        os.makedirs(CONFIG_DIR, exist_ok=True)
         # Merge, don't replace: this also runs when a rejected key is re-entered,
         # and every other setting (names, voice, plugins…) lives in the same file.
-        cfg = _read_full_config()
-        cfg.update(gemini_api_key=key, os_system=os_name)
-        API_FILE.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
+        from memory.config_manager import _patch_config
+        _patch_config(gemini_api_key=key, os_system=os_name)
         self._ready = True
         if self._overlay:
             self._overlay.hide()
