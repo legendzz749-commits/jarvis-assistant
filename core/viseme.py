@@ -32,6 +32,7 @@ result is never wrong, only less detailed.
 
 from __future__ import annotations
 
+import threading
 import unicodedata
 from collections import deque
 
@@ -140,8 +141,9 @@ def to_latin(ch: str) -> str:
         return _CYRILLIC[c]
     if c in _GREEK:
         return _GREEK[c]
-    # Strip combining marks: é→e, ü→u, ş→s, ğ→g, ế→e, ñ→n, å→a …
-    base = "".join(k for k in unicodedata.normalize("NFD", c)
+    # Strip combining marks: é→e, ü→u, ş→s, ğ→g, ế→e, ñ→n, å→a … NFKD also
+    # unfolds compatibility forms (ﬁ → fi, fullwidth ａ → a), which NFD leaves.
+    base = "".join(k for k in unicodedata.normalize("NFKD", c)
                    if not unicodedata.combining(k))
     if len(base) == 1 and "a" <= base <= "z":
         return base
@@ -216,9 +218,9 @@ def text_to_visemes(text: str) -> list[tuple[str, float]]:
 class VisemeStream:
     """Fuses the transcript's shape sequence onto the audio's timing.
 
-    Thread note: `feed_text` runs on the receive coroutine and `frames` on the
-    playback coroutine. Both live in the same asyncio loop, and `deque` append
-    and popleft are atomic, so no lock is needed.
+    Thread note: `feed_text` and `frames` run in the asyncio loop, but `reset`
+    is also called from the GUI thread (Esc / the interrupt button), so the
+    queue and cursor are guarded by a lock.
     """
 
     # Seconds a phoneme occupies at a normal speaking rate. The clock adapts
@@ -231,18 +233,21 @@ class VisemeStream:
         self._q: deque[tuple[str, float]] = deque()
         self._cur = ("REST", 1.0)
         self._carry = 0.0
+        self._lock = threading.Lock()
 
     def reset(self) -> None:
-        self._q.clear()
-        self._cur = ("REST", 1.0)
-        self._carry = 0.0
+        with self._lock:
+            self._q.clear()
+            self._cur = ("REST", 1.0)
+            self._carry = 0.0
 
     def feed_text(self, text: str) -> None:
-        for item in text_to_visemes(text):
-            self._q.append(item)
-        # Never let a stalled turn pile up an unbounded backlog.
-        while len(self._q) > 600:
-            self._q.popleft()
+        items = text_to_visemes(text)
+        with self._lock:
+            self._q.extend(items)
+            # Never let a stalled turn pile up an unbounded backlog.
+            while len(self._q) > 600:
+                self._q.popleft()
 
     @property
     def pending(self) -> int:
@@ -256,6 +261,10 @@ class VisemeStream:
 
     def frames(self, audio, hop: float):
         """Blend audio frames [(level, openness, width)] with the text queue."""
+        with self._lock:
+            return self._frames(audio, hop)
+
+    def _frames(self, audio, hop: float):
         out = []
         for level, a_open, a_wide in audio:
             if level <= 0.0:

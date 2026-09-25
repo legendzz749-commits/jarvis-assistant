@@ -1460,7 +1460,8 @@ class JarvisLive:
             # unplugged since the last run falls back to the built-in mic
             # instead of raising on startup and taking the session with it.
             _mic_name = get_input_device()
-            _mic_dev  = audio_devices.resolve(_mic_name, "input")
+            # Off the loop: enumerating and probing devices can take seconds.
+            _mic_dev  = await asyncio.to_thread(audio_devices.resolve, _mic_name, "input")
             if _mic_dev is not None:
                 print(f"[JARVIS] 🎤 Input device: {_mic_name}")
             try:
@@ -1705,7 +1706,7 @@ class JarvisLive:
         print("[JARVIS] 🔊 Play started")
 
         _spk_name = get_output_device()
-        _spk_dev  = audio_devices.resolve(_spk_name, "output")
+        _spk_dev  = await asyncio.to_thread(audio_devices.resolve, _spk_name, "output")
         if _spk_dev is not None:
             print(f"[JARVIS] 🔊 Output device: {_spk_name}")
 

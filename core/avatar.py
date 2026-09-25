@@ -130,6 +130,8 @@ class HoloAvatar:
         self._n0 = mesh["normals"]
         self._jaw = mesh["jaw"]
         self._brow_w = mesh["brow"]
+        # -1 at the left brow, +1 at the right, 0 on the midline (no crease)
+        self._side = np.clip(self._v0[:, 0] / 0.34, -1.0, 1.0)
         self._lips_w = mesh["lips"]
         self._lip_c = mesh["lip_centre"]
         self._fade = mesh["fade"]
@@ -175,6 +177,8 @@ class HoloAvatar:
         self._expr_tgt = 0.0
         self._expr_at = 0.0
         self._brow = 0.0           # smoothed brow lift, -0.4 .. 1.2
+        self._skew = 0.0           # slow left/right difference in that lift
+        self._skew_tgt = 0.0
         self._emph = 0.0           # syllable emphasis, drives the head nod
         self._gaze = [0.0, 0.0]
         self._gaze_tgt = [0.0, 0.0]
@@ -327,11 +331,14 @@ class HoloAvatar:
         if live:
             if t >= self._expr_at:
                 self._expr_tgt = random.uniform(-0.35, 1.0)
+                self._skew_tgt = random.uniform(-0.3, 0.3)
                 self._expr_at = t + 1.1 + 2.0 * random.random()
         else:
             self._expr_tgt = 0.0
+            self._skew_tgt = 0.0
             self._expr_at = t + 0.8
         self._expr += (self._expr_tgt - self._expr) * 0.075
+        self._skew += (self._skew_tgt - self._skew) * 0.03   # slower than the lift
 
         brow_t = 0.55 * self._amp_slow + 0.60 * self._expr + self._brow_bias
         self._brow += (max(-0.4, min(1.2, brow_t)) - self._brow) * 0.20
@@ -437,7 +444,7 @@ class HoloAvatar:
             # moves a third of it. The old 0.045 — halved again by the landmark
             # weights, which average 0.5 — worked out to six pixels on a 250 px
             # head, which is to say invisible.
-            v[:, 1] += self._brow_w * (self._brow * _BROW_LIFT)
+            v[:, 1] += self._brow_w * (self._brow * _BROW_LIFT) * (1.0 + self._skew * self._side)
 
         if abs(self._wide) > 0.01 and self._mouth > 0.0:
             # Spread pulls the corners out and flattens the lips back; rounding

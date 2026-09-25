@@ -14,6 +14,11 @@ config/jarvis.png
 # Runtime data
 jarvis_memory.json
 reminders.json
+# Phone uploads (fallback folder) and screenshots taken from the repo folder
+uploads/
+screenshot.png
+*_scrot.png
+.env
 
 # Python
 __pycache__/

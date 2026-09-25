@@ -52,8 +52,13 @@ def is_ready() -> bool:
     if not is_installed():
         return False
     try:
-        import openwakeword
-        models_dir = Path(openwakeword.__file__).resolve().parent / "resources" / "models"
+        # Located, not imported: importing openwakeword pulls in onnxruntime,
+        # scipy and scikit-learn (~1 s), and this runs on the Qt thread.
+        import importlib.util
+        spec = importlib.util.find_spec("openwakeword")
+        if spec is None or not spec.submodule_search_locations:
+            return False
+        models_dir = Path(list(spec.submodule_search_locations)[0]) / "resources" / "models"
         if not models_dir.is_dir():
             return False
         # Only the ONNX files start() actually loads count: .tflite leftovers

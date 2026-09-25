@@ -36,6 +36,7 @@ DEFAULT_VALUE = ""
 
 _cache: dict[str, list[str]] | None = None
 _cache_lock = threading.Lock()
+_query_lock = threading.Lock()   # held for a whole enumeration
 
 # Which host API each direction settled on, so resolve() opens the same endpoint
 # the picker listed. Filled in by _query().
@@ -324,9 +325,10 @@ def prefetch() -> None:
     settings drawer never pays for enumeration on the Qt thread."""
     def _work():
         global _cache
-        result = _query()
-        with _cache_lock:
-            _cache = result
+        with _query_lock:
+            result = _query()
+            with _cache_lock:
+                _cache = result
         print(f"[Audio] {len(result['input'])} input / "
               f"{len(result['output'])} output devices found")
     threading.Thread(target=_work, daemon=True, name="audio-devices").start()
@@ -339,9 +341,16 @@ def list_devices(kind: str, refresh: bool = False) -> list[str]:
     with _cache_lock:
         cached = None if refresh else _cache
     if cached is None:
-        cached = _query()
-        with _cache_lock:
-            _cache = cached
+        # One enumeration at a time: a caller arriving while the prefetch is
+        # still probing waits for its result instead of opening every device
+        # a second time, concurrently.
+        with _query_lock:
+            with _cache_lock:
+                cached = None if refresh else _cache
+            if cached is None:
+                cached = _query()
+                with _cache_lock:
+                    _cache = cached
     return list(cached.get(kind, []))
 
 

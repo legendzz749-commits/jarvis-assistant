@@ -2,6 +2,8 @@
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from core import action_loader, hotkey, wake_word
 
 
@@ -61,3 +63,40 @@ def test_setup_explains_an_externally_managed_python(tmp_path, monkeypatch, caps
     with pytest.raises(SystemExit):
         setup._check_environment()
     assert "venv" in capsys.readouterr().out
+
+
+def test_pip_building_the_installer_stops_with_a_sentence():
+    import subprocess
+    import sys
+    from pathlib import Path
+    setup = Path(__file__).resolve().parents[1] / "setup.py"
+    r = subprocess.run([sys.executable, str(setup), "egg_info"], capture_output=True, text=True)
+    assert r.returncode == 1 and "not a Python package" in r.stderr
+
+
+def test_old_python_gets_the_version_sentence_not_a_traceback():
+    import shutil
+    import subprocess
+    from pathlib import Path
+    py38 = shutil.which("python3.8") or next(
+        iter(Path.home().glob(".local/share/uv/python/cpython-3.8*/bin/python3.8")), None)
+    if not py38:
+        pytest.skip("no Python 3.8 interpreter available")
+    setup = Path(__file__).resolve().parents[1] / "setup.py"
+    r = subprocess.run([str(py38), str(setup)], capture_output=True, text=True)
+    assert "Traceback" not in r.stderr and "needs at" in r.stdout
+
+
+def test_linux_screenshot_lands_in_pictures_not_the_repo(tmp_path, monkeypatch):
+    import shutil
+    from actions import computer_settings as cs
+    from actions import file_controller
+    launched = []
+    monkeypatch.setattr(cs, "_OS", "Linux")
+    monkeypatch.setattr(file_controller, "_known_folder", lambda name: tmp_path / name)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/scrot" if name == "scrot" else None)
+    monkeypatch.setattr(cs.subprocess, "run", lambda argv, **k: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(cs.subprocess, "Popen", lambda argv, **k: launched.append(argv))
+    cs.take_screenshot()
+    (argv,) = launched
+    assert argv[0] == "scrot" and argv[1].startswith(str(tmp_path / "Pictures"))

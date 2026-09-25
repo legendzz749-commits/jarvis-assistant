@@ -509,8 +509,14 @@ def take_screenshot():
     elif _OS == "Darwin":
         pyautogui.hotkey("command", "shift", "3")
     else:
-        for cmd in [["scrot"], ["gnome-screenshot"], ["import", "-window", "root", "screenshot.png"]]:
-            if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
+        # An explicit path: scrot and import otherwise write into the current
+        # directory — the repository — where a `git add .` would pick it up.
+        from actions.file_controller import _known_folder
+        shot = _known_folder("Pictures") / time.strftime("Screenshot_%Y-%m-%d_%H-%M-%S.png")
+        shot.parent.mkdir(parents=True, exist_ok=True)
+        for cmd in [["scrot", str(shot)], ["gnome-screenshot", "-f", str(shot)],
+                    ["import", "-window", "root", str(shot)]]:
+            if shutil.which(cmd[0]):
                 subprocess.Popen(cmd)
                 return
         pyautogui.hotkey("ctrl", "printscreen")
