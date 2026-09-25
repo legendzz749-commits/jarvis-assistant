@@ -79,10 +79,19 @@ def install_and_download(logger: Callable[[str], None] = print,
         if not is_installed():
             logger("Wake word: installing openwakeword (one-time)…")
             _tell("Wake word: installing openwakeword (one-time)…")
+            # openwakeword 0.6 requires tflite-runtime on Linux, which has no
+            # Python 3.12+ wheels, so pip silently backtracks to 0.4 — whose API
+            # this module cannot use. Install 0.6 without it; we run ONNX only.
             r = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "openwakeword"],
+                [sys.executable, "-m", "pip", "install", "--no-deps", "openwakeword>=0.6,<0.7"],
                 capture_output=True, text=True,
             )
+            if r.returncode == 0:
+                r = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "onnxruntime>=1.10,<2",
+                     "tqdm", "scipy", "scikit-learn", "requests"],
+                    capture_output=True, text=True,
+                )
             if r.returncode != 0:
                 tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [""]
                 return False, f"pip install failed: {tail[0][:160]}"

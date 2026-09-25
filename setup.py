@@ -66,6 +66,26 @@ def _check_assets() -> None:
         )
 
 
+def _check_linux_libraries() -> None:
+    """System libraries pip cannot install. Without them the window opens but
+    the assistant never starts, so name them up front."""
+    import ctypes.util
+    missing = []
+    try:
+        import tkinter  # noqa: F401 — pyautogui exits on import without it
+    except ImportError:
+        missing.append("Tk for Python")
+    if not ctypes.util.find_library("portaudio"):
+        missing.append("PortAudio (microphone/speakers)")
+    if not ctypes.util.find_library("xcb-cursor"):
+        missing.append("xcb-cursor (Qt 6.5+ window support)")
+    if missing:
+        print("\n❌ Missing system libraries: " + ", ".join(missing) + ". Install them with:\n"
+              "    Debian/Ubuntu: sudo apt install python3-tk libportaudio2 libxcb-cursor0\n"
+              "    Fedora:        sudo dnf install python3-tkinter portaudio xcb-util-cursor\n"
+              "    Arch:          sudo pacman -S tk portaudio xcb-util-cursor")
+
+
 def main() -> None:
     print(f"⚙  MARK LIV setup — detected OS: {OS or 'unknown'}, "
           f"Python {sys.version_info[0]}.{sys.version_info[1]}")
@@ -104,6 +124,7 @@ def main() -> None:
                 f'    "{sys.executable}" "{postinstall}" -install'
             )
     elif OS == "Linux":
+        _check_linux_libraries()
         print(
             "\nℹ️  Linux note — a few voice-controlled OS actions shell out to "
             "native tools. Install the ones you'll use via your package manager:\n"
