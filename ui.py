@@ -1258,7 +1258,12 @@ class _DropCanvas(QWidget):
         path = Path(self._z._current_file)
         cat  = _file_category(path)
         icon, icon_col = _FILE_ICONS.get(cat, _FILE_ICONS["unknown"])
-        size_str = _fmt_size(path.stat().st_size)
+        try:
+            size_str = _fmt_size(path.stat().st_size)
+        except OSError:
+            # Renamed, moved or deleted since it was dropped. An exception in a
+            # paint event aborts the whole Qt process.
+            size_str = "missing"
         ext_str  = path.suffix.upper().lstrip(".") or "FILE"
 
         block_x, block_w = 10, 60

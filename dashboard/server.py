@@ -30,7 +30,7 @@ except ImportError:
 # python-multipart is required for file uploads — optional dependency
 _UPLOAD_OK = False
 try:
-    from fastapi import UploadFile, File as FastAPIFile
+    from fastapi import UploadFile, File as FastAPIFile  # noqa: F401 — availability probe
     _UPLOAD_OK = True
 except Exception:
     pass
@@ -96,6 +96,16 @@ _CRYPTOJS_CDN  = ("https://cdnjs.cloudflare.com/ajax/libs/"
 _CRYPTOJS_FILE = STATIC_DIR / "crypto-js.min.js"
 
 
+async def _serve_or_disable(cfg) -> None:
+    """Run uvicorn inside JARVIS's loop. When the port is taken, uvicorn calls
+    sys.exit() — inside this task that would end the whole assistant, not just
+    the dashboard."""
+    try:
+        await uvicorn.Server(cfg).serve()
+    except (SystemExit, OSError) as e:
+        print(f"[Dashboard] Could not listen on port {cfg.port} ({e}) — remote dashboard disabled.")
+
+
 def _ensure_network_access(port: int) -> None:
     """Cross-platform, best-effort: open port in the OS firewall for LAN access.
 
@@ -113,8 +123,6 @@ def _ensure_network_access(port: int) -> None:
         import ctypes, time
 
         port_rule = f"JARVIS Dashboard Port {port}"
-        prog_rule  = "JARVIS Dashboard Python"
-        py_exe     = sys.executable
 
         def _netsh_rule_exists(name: str) -> bool:
             try:
@@ -139,34 +147,22 @@ def _ensure_network_access(port: int) -> None:
             except Exception:
                 return False
 
-        need_port    = not _netsh_rule_exists(port_rule)
-        need_prog    = not _netsh_rule_exists(prog_rule)
-        need_private = _network_is_public()
+        # Public networks (café, airport) are deliberately left untrusted:
+        # reclassifying them as Private would open file sharing and discovery
+        # there for the whole machine, not just this dashboard.
+        if _network_is_public():
+            print("[Dashboard] This network is set to Public in Windows — the phone "
+                  "dashboard is only reachable on Private (home/work) networks.")
 
-        if not need_port and not need_prog and not need_private:
-            return  # already fully configured
+        if _netsh_rule_exists(port_rule):
+            return  # already configured
 
-        # Build a .bat file — netsh + powershell, runs fast when elevated
-        bat_lines = ["@echo off"]
-        if need_private:
-            bat_lines.append(
-                'powershell -NoProfile -NonInteractive -Command "'
-                'Get-NetConnectionProfile | '
-                "Where-Object {$_.NetworkCategory -eq 'Public'} | "
-                'Set-NetConnectionProfile -NetworkCategory Private"'
-            )
-        if need_port:
-            bat_lines.append(
-                f'netsh advfirewall firewall add rule '
-                f'name="{port_rule}" protocol=TCP dir=in '
-                f'localport={port} action=allow'
-            )
-        if need_prog:
-            bat_lines.append(
-                f'netsh advfirewall firewall add rule '
-                f'name="{prog_rule}" dir=in action=allow '
-                f'program="{py_exe}" enable=yes'
-            )
+        # Build a .bat file — runs fast when elevated
+        bat_lines = ["@echo off",
+                     f'netsh advfirewall firewall add rule '
+                     f'name="{port_rule}" protocol=TCP dir=in '
+                     f'localport={port} action=allow '
+                     f'profile=private,domain remoteip=localsubnet']
 
         bat_body = "\r\n".join(bat_lines) + "\r\n"
         fd, bat_path = tempfile.mkstemp(suffix=".bat", prefix="jarvis_fw_")
@@ -728,9 +724,25 @@ class DashboardServer:
 
         if _UPLOAD_OK:
             @app.post("/api/upload")
-            async def upload_file(req: Request, file: UploadFile = FastAPIFile(...)):
+            async def upload_file(req: Request):
+                # Declaring the file as a parameter made FastAPI spool the whole
+                # body to disk before this ran — unauthenticated, and unbounded.
                 if not _auth(req):
                     return JSONResponse({"error": "Unauthorized"}, status_code=401)
+                max_bytes = MAX_UPLOAD_MB * 1024 * 1024
+                try:
+                    declared = int(req.headers.get("content-length", ""))
+                except ValueError:
+                    return JSONResponse({"error": "Content-Length required"}, status_code=411)
+                if declared > max_bytes + 64 * 1024:          # + multipart framing
+                    return JSONResponse(
+                        {"error": f"File too large (max {MAX_UPLOAD_MB} MB)"},
+                        status_code=413,
+                    )
+                form = await req.form(max_files=1)
+                file = form.get("file")
+                if file is None or isinstance(file, str):
+                    return JSONResponse({"error": "No file in upload"}, status_code=400)
 
                 safe = _safe_filename(file.filename or "upload")
                 dest = self._uploads_dir / safe
@@ -741,7 +753,6 @@ class DashboardServer:
                     counter += 1
 
                 size = 0
-                max_bytes = MAX_UPLOAD_MB * 1024 * 1024
                 try:
                     with open(dest, "wb") as fout:
                         while True:
@@ -851,7 +862,7 @@ class DashboardServer:
             ssl_keyfile=str(ssl_key), ssl_certfile=str(ssl_cert),
         )
         print(f"[Dashboard] Manual entry:  {self._ip}:{PORT + 1}  (type in browser, accept cert once)")
-        await uvicorn.Server(cfg).serve()
+        await _serve_or_disable(cfg)
 
     async def serve(self) -> None:
         if not _DEPS_OK:
@@ -881,4 +892,4 @@ class DashboardServer:
         proto = "https" if use_ssl else "http"
         print(f"[Dashboard] {proto}://{self._ip}:{PORT}")
         print("[Dashboard] Press 'Remote Control' in JARVIS UI to get the QR code.")
-        await uvicorn.Server(cfg).serve()
+        await _serve_or_disable(cfg)
