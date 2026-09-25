@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import platform
 from pathlib import Path
@@ -129,48 +130,50 @@ def _is_safe_path(target: Path) -> bool:
     except Exception:
         return False
 
-def _get_desktop() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DESKTOP_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Desktop"
+# Where the standard folders really are. XDG_*_DIR is almost never exported to
+# the environment — it lives in ~/.config/user-dirs.dirs (a Turkish desktop is
+# ~/Masaüstü) — and Windows moves them into OneDrive; the registry says where.
+_XDG_KEYS = {"Desktop": "XDG_DESKTOP_DIR", "Downloads": "XDG_DOWNLOAD_DIR",
+             "Documents": "XDG_DOCUMENTS_DIR", "Pictures": "XDG_PICTURES_DIR",
+             "Music": "XDG_MUSIC_DIR", "Videos": "XDG_VIDEOS_DIR"}
+_WIN_SHELL_KEYS = {"Desktop": "Desktop", "Documents": "Personal",
+                   "Pictures": "My Pictures", "Music": "My Music", "Videos": "My Video",
+                   "Downloads": "{374DE290-123F-4565-9164-39C4925E467B}"}
 
-def _get_downloads() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DOWNLOAD_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Downloads"
 
-def _get_documents() -> Path:
+def _known_folder(name: str) -> Path:
     if _OS == "Linux":
-        xdg = os.environ.get("XDG_DOCUMENTS_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Documents"
+        key = _XDG_KEYS[name]
+        value = os.environ.get(key, "")
+        if not value:
+            cfg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "user-dirs.dirs"
+            try:
+                m = re.search(rf'^{key}="([^"]*)"', cfg.read_text(encoding="utf-8"), re.MULTILINE)
+                value = m.group(1).replace("$HOME", str(Path.home())) if m else ""
+            except OSError:
+                value = ""
+        if value and Path(value).exists():
+            return Path(value)
+    elif _OS == "Windows":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as k:
+                raw, _ = winreg.QueryValueEx(k, _WIN_SHELL_KEYS[name])
+            folder = Path(os.path.expandvars(raw))
+            if folder.exists():
+                return folder
+        except OSError:
+            pass
+    return Path.home() / name
 
-def _get_pictures() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_PICTURES_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Pictures"
 
-def _get_music() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_MUSIC_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Music"
-
-def _get_videos() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_VIDEOS_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Videos"
-
+def _get_desktop() -> Path:   return _known_folder("Desktop")
+def _get_downloads() -> Path: return _known_folder("Downloads")
+def _get_documents() -> Path: return _known_folder("Documents")
+def _get_pictures() -> Path:  return _known_folder("Pictures")
+def _get_music() -> Path:     return _known_folder("Music")
+def _get_videos() -> Path:    return _known_folder("Videos")
 
 def _resolve_path(raw: str) -> Path:
     shortcuts: dict[str, Path] = {

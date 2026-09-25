@@ -156,3 +156,15 @@ def test_organize_keeps_going_and_stays_undoable_when_one_file_fails(home, monke
 
 def test_write_tool_declares_append():
     assert "append" in fc.TOOL["parameters"]["properties"]
+
+
+def test_localized_linux_desktop_is_found_from_user_dirs(home, monkeypatch):
+    monkeypatch.setattr(fc, "_OS", "Linux")
+    monkeypatch.delenv("XDG_DESKTOP_DIR", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    (home / "Masaüstü").mkdir()
+    (home / ".config").mkdir()
+    (home / ".config" / "user-dirs.dirs").write_text('XDG_DESKTOP_DIR="$HOME/Masaüstü"\n', encoding="utf-8")
+    assert fc._get_desktop() == home / "Masaüstü"
+    from actions import desktop
+    assert desktop._get_desktop() == home / "Masaüstü"

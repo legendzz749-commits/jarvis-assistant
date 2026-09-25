@@ -32,11 +32,8 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
     
 def _get_desktop() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DESKTOP_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Desktop"
+    from actions.file_controller import _known_folder   # user-dirs.dirs / OneDrive aware
+    return _known_folder("Desktop")
 
 def _build_sandbox() -> dict:
     import time
