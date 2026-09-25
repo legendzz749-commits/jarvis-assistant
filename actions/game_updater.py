@@ -185,11 +185,19 @@ def _is_steam_running() -> bool:
     except Exception:
         return False
 
+def _is_steam_window(title: str) -> bool:
+    """Steam's own windows ('Steam', 'Sign in to Steam') — not a browser tab
+    such as 'ELDEN RING on Steam - Google Chrome', which 'steam' in title
+    also matched, and which then got clicked and typed into."""
+    return bool(re.fullmatch(r"(sign in to )?steam( .*)?", title.strip().lower())) \
+        and " - " not in title
+
+
 def _get_steam_window_rect() -> tuple[int, int, int, int] | None:
     try:
         import pygetwindow as gw
         for w in gw.getAllWindows():
-            if "steam" in w.title.lower() and w.width > 200 and w.visible:
+            if _is_steam_window(w.title) and w.width > 200 and w.visible:
                 return w.left, w.top, w.width, w.height
     except Exception:
         pass
@@ -346,44 +354,11 @@ def _click_button(window, keywords: list[str]) -> bool:
 
 
 def _handle_install_dialog_pyautogui(game_name: str, best_drive: dict) -> str:
-    try:
-        import pyautogui
-        import pygetwindow as gw
-    except ImportError:
-        return (f"Install dialog opened for '{game_name}'. "
-                f"Please select '{best_drive['letter']}:' and click Install manually.")
-
-    pyautogui.FAILSAFE = False
-    drive_label = f"{best_drive['letter']}:"
-    install_win = None
-
-    for _ in range(30):
-        time.sleep(0.5)
-        for w in gw.getAllWindows():
-            if ("install" in w.title.lower() or "steam" in w.title.lower()) \
-                    and w.width > 300 and w.visible:
-                install_win = w
-                break
-        if install_win:
-            break
-
-    if not install_win:
-        return f"Please select '{drive_label}' and click Install in Steam for '{game_name}'."
-
-    try:
-        install_win.activate()
-        time.sleep(0.4)
-    except Exception:
-        pass
-
-    wx, wy = install_win.left, install_win.top
-    ww, wh = install_win.width, install_win.height
-    pyautogui.click(wx + int(ww * 0.35), wy + int(wh * 0.45))
-    time.sleep(0.2)
-    pyautogui.typewrite(best_drive["letter"], interval=0.05)
-    time.sleep(0.2)
-    pyautogui.click(wx + int(ww * 0.72), wy + int(wh * 0.88))
-    return f"Attempted drive {drive_label} selection and Install click for '{game_name}'."
+    # Used to click two guessed spots and type a drive letter into any window
+    # whose title contained "install" or "steam" (a browser tab, an installer…).
+    # Without pywinauto nothing identifies the dialog's controls, so ask instead.
+    return (f"The Steam install dialog for '{game_name}' is open. Choose "
+            f"'{best_drive['letter']}:' ({best_drive['free_gb']:.0f} GB free) and click Install.")
 
 
 def _handle_install_dialog(game_name: str) -> str:

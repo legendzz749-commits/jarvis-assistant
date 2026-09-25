@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from actions import game_updater as gu
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,3 +73,12 @@ def test_auto_shutdown_waits_for_a_human(monkeypatch):
     finally:
         confirm.resolve(False)
         monkeypatch.setattr(confirm, "_show_cb", None)
+
+
+@pytest.mark.parametrize("title,ok", [
+    ("Steam", True), ("Sign in to Steam", True),
+    ("ELDEN RING on Steam - Google Chrome", False), ("Steam - Mozilla Firefox", False),
+    ("Steamworks SDK readme.txt - Notepad", False),
+])
+def test_only_steams_own_windows_are_automated(title, ok):
+    assert gu._is_steam_window(title) is ok
