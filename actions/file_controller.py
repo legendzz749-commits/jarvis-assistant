@@ -239,7 +239,11 @@ def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
             if item.is_dir():
                 items.append(f"📁 {item.name}/")
             else:
-                size = _format_size(item.stat().st_size)
+                try:
+                    size = _format_size(item.stat().st_size)
+                except OSError:   # a dangling symlink used to fail the whole listing
+                    items.append(f"🔗 {item.name} (broken link)")
+                    continue
                 items.append(f"📄 {item.name} ({size})")
 
         if not items:
@@ -420,7 +424,9 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
             return "The new name must be a plain name, not a path — use move for that."
 
         new_path = target.parent / new_name
-        if new_path.exists():
+        # On case-insensitive disks (Windows, macOS) "Report.pdf" exists when
+        # renaming report.pdf to it — that is the same file, not a collision.
+        if new_path.exists() and not new_path.samefile(target):
             return f"A file named '{new_name}' already exists here."
 
         old_path = target.resolve()

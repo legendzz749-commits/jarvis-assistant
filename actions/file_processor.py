@@ -51,7 +51,7 @@ def _gemini_client(tier: str = gemini.SMART):
 
 def _detect_type(path: Path) -> str:
     ext = path.suffix.lower().lstrip(".")
-    image_exts = {"jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "svg", "ico"}
+    image_exts = {"jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"}   # svg is XML text
     video_exts = {"mp4", "avi", "mov", "mkv", "wmv", "flv", "webm", "m4v", "3gp"}
     audio_exts = {"mp3", "wav", "ogg", "m4a", "aac", "flac", "wma", "opus"}
     code_exts  = {"py", "js", "ts", "jsx", "tsx", "html", "css", "java", "c",
@@ -154,7 +154,9 @@ def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
                    "webp": "WEBP", "bmp": "BMP", "tiff": "TIFF"}
         pil_fmt = fmt_map.get(fmt, fmt.upper())
         try:
-            img = Image.open(path).convert("RGB") if fmt == "jpg" else Image.open(path)
+            img = Image.open(path)
+            if pil_fmt == "JPEG" and img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")      # JPEG has no alpha or palette
             out = _output_path(path, "converted", f".{fmt}")
             img.save(out, pil_fmt)
             return f"Converted to {fmt.upper()}. Saved: {out.name}"
@@ -296,7 +298,7 @@ def _process_text_doc(path: Path, file_type: str, action: str,
         return f"Word count: {words} words, {chars} characters, {lines} lines."
 
     if action == "extract_text":
-        if file_type != "txt":
+        if file_type not in ("txt", "text"):     # plain text is returned, not copied
             out = _output_path(path, "extracted", ".txt")
             out.write_text(content, encoding="utf-8")
             return f"Text extracted. Saved: {out.name}"
@@ -376,6 +378,8 @@ def _process_data(path: Path, file_type: str, action: str,
     if action in ("convert", "to_csv", "to_excel", "to_json"):
         fmt = {"to_csv": "csv", "to_excel": "xlsx", "to_json": "json",
                "convert": params.get("format", "csv")}.get(action, "csv")
+        fmt = str(fmt).lower().lstrip(".")
+        fmt = {"excel": "xlsx", "xls": "xlsx"}.get(fmt, fmt)
         try:
             if fmt == "csv":
                 out = _output_path(path, "converted", ".csv")
@@ -386,6 +390,8 @@ def _process_data(path: Path, file_type: str, action: str,
             elif fmt == "json":
                 out = _output_path(path, "converted", ".json")
                 df.to_json(out, orient="records", force_ascii=False, indent=2)
+            else:
+                return f"Unsupported format '{fmt}'. Use csv, xlsx or json."
             return f"Converted to {fmt.upper()}. Saved: {out.name}"
         except Exception as e:
             return f"Convert failed: {e}"
@@ -395,7 +401,7 @@ def _process_data(path: Path, file_type: str, action: str,
         value     = params.get("value", "")
         condition = params.get("condition", "equals")
         if not col or col not in df.columns:
-            return f"Column '{col}' not found. Available: {', '.join(df.columns)}"
+            return f"Column '{col}' not found. Available: {', '.join(map(str, df.columns))}"
         try:
             if condition == "equals":
                 if pd.api.types.is_numeric_dtype(df[col]):
@@ -438,10 +444,15 @@ def _process_data(path: Path, file_type: str, action: str,
         return f"Processing failed: {e}"
 
 
+def _seconds(value) -> float:
+    """'90', '1:30' or '00:01:30' → 90.0"""
+    return sum(float(part) * 60 ** i for i, part in enumerate(reversed(str(value).split(":"))))
+
+
 def _process_json(path: Path, action: str, params: dict, speak=None) -> str:
     action = action or "analyze"
     try:
-        content = path.read_text(encoding="utf-8")
+        content = path.read_text(encoding="utf-8-sig")   # Notepad adds a BOM
         data    = json.loads(content)
     except Exception as e:
         return f"Invalid JSON: {e}"
@@ -592,9 +603,9 @@ def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
             return f"Convert failed: {e}"
 
     if action == "trim":
-        start = float(params.get("start", 0))
-        end   = float(params.get("end",   0))
         try:
+            start = _seconds(params.get("start", 0))
+            end   = _seconds(params.get("end",   0))
             from pydub import AudioSegment
             audio   = AudioSegment.from_file(path)
             end_ms  = int(end * 1000)   if end   else len(audio)

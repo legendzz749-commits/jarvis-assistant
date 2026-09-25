@@ -168,3 +168,10 @@ def test_localized_linux_desktop_is_found_from_user_dirs(home, monkeypatch):
     assert fc._get_desktop() == home / "Masaüstü"
     from actions import desktop
     assert desktop._get_desktop() == home / "Masaüstü"
+
+
+def test_a_broken_symlink_does_not_break_the_listing(home):
+    (home / "Documents" / "real.txt").write_text("x")
+    (home / "Documents" / "gone").symlink_to(home / "nowhere")
+    out = fc.list_files(str(home / "Documents"))
+    assert "real.txt" in out and "broken link" in out

@@ -106,3 +106,35 @@ def test_failed_ffmpeg_run_is_not_reported_as_success(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=1)                # ...but this run fails
     monkeypatch.setattr(fp.subprocess, "run", fake_run)
     assert "failed" in fp._process_video(video, "convert", {"format": "webm"}).lower()
+
+
+def test_png_with_alpha_converts_to_jpeg(tmp_path):
+    from PIL import Image
+    src = tmp_path / "logo.png"
+    Image.new("RGBA", (4, 4), (255, 0, 0, 128)).save(src)
+    assert "Converted" in fp._process_image(src, "convert", {"format": "jpeg"})
+
+
+def test_numeric_headers_and_unknown_formats_do_not_crash(tmp_path):
+    pd = pytest.importorskip("pandas")
+    path = tmp_path / "t.xlsx"
+    pd.DataFrame({1: [1], 2: [2]}).to_excel(path, index=False)
+    assert "Available" in fp._process_data(path, "excel", "filter", {"column": "x"})
+    assert "Unsupported format" in fp._process_data(path, "excel", "convert", {"format": "pdf"})
+
+
+def test_time_strings_parse_to_seconds():
+    assert fp._seconds("00:01:30") == 90 and fp._seconds("1:30") == 90 and fp._seconds(90) == 90
+
+
+def test_json_with_bom_is_valid(tmp_path, sent):
+    path = tmp_path / "d.json"
+    path.write_bytes(b"\xef\xbb\xbf" + b'{"a": 1}')
+    assert "Invalid JSON" not in fp._process_json(path, "analyze", {})
+
+
+def test_extract_text_of_a_text_file_returns_it(tmp_path):
+    path = tmp_path / "n.txt"
+    path.write_text("hello there")
+    assert fp._process_text_doc(path, "text", "extract_text", {}) == "hello there"
+    assert not list(tmp_path.glob("*_extracted.txt"))
