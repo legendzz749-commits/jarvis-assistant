@@ -143,7 +143,7 @@ def _get_steam_libraries(steam_path: Path) -> list[Path]:
         content = vdf_path.read_text(encoding="utf-8", errors="ignore")
         for raw_path in re.findall(r'"path"\s+"([^"]+)"', content):
             lib = Path(raw_path.replace("\\\\", "/")) / "steamapps"
-            if lib.exists() and lib not in libraries:
+            if lib.exists() and lib.resolve() not in {x.resolve() for x in libraries}:
                 libraries.append(lib)
     except Exception:
         pass
@@ -299,7 +299,7 @@ def _select_drive_in_dialog(dialog, drive_letter: str) -> bool:
     for control_type in ("ListItem", "RadioButton"):
         try:
             for ctrl in dialog.descendants(control_type=control_type):
-                if target in ctrl.window_text().upper():
+                if re.search(rf"\b{re.escape(target)}:", ctrl.window_text().upper()):
                     ctrl.click_input()
                     print(f"[GameUpdater] ✅ Drive selected ({control_type}): {ctrl.window_text()}")
                     return True
@@ -494,11 +494,6 @@ def _search_steam_appid(game_name: str) -> tuple[str | None, str | None]:
         print(f"[GameUpdater] 📖 Bilinen: {canonical} ({app_id})")
         return app_id, canonical
 
-    for key, (app_id, canonical) in _KNOWN_APPIDS.items():
-        if name_lower in key or key in name_lower:
-            print(f"[GameUpdater] 📖 Partial match: {canonical} ({app_id})")
-            return app_id, canonical
-
     try:
         import urllib.request, urllib.parse
         query = urllib.parse.quote(game_name)
@@ -621,8 +616,8 @@ def _install_steam_game(steam_path: Path, game_name: str = None,
 
 def _get_download_status(steam_path: Path) -> str:
     games   = _get_steam_games(steam_path)
-    active  = [g for g in games if g["state"] == 1026]
-    pending = [g for g in games if g["state"] in (6, 516)]
+    active  = [g for g in games if _downloading(g["state"])]
+    pending = [g for g in games if g["state"] & 2 and not _downloading(g["state"])]
     lines   = []
     if active:
         lines.append(f"Downloading: {', '.join(g['name'] for g in active)}.")
@@ -631,6 +626,16 @@ def _get_download_status(steam_path: Path) -> str:
         suffix = f" and {len(pending) - 5} more" if len(pending) > 5 else ""
         lines.append(f"Pending updates: {names}{suffix}.")
     return " ".join(lines) if lines else "No active downloads or pending updates."
+
+
+def _downloading(state: int) -> bool:
+    return bool(state & 1024) and not state & 512
+
+
+def _update_finished(state: int) -> bool:
+    """Installed and nothing outstanding. A paused or queued download still has
+    'update required' set — equality with 1026 read those as finished."""
+    return bool(state & 4) and not state & (2 | 1024)
 
 
 def _system_shutdown() -> None:
@@ -642,6 +647,23 @@ def _system_shutdown() -> None:
         subprocess.run(["systemctl", "poweroff"])
 
 
+def _arm_auto_shutdown(steam_path: Path, speak=None) -> str:
+    """Shutting the PC down is irreversible, so the watcher is only started
+    once the user presses CONFIRM on the HUD — then it can run unattended."""
+    from core import confirm
+    if confirm.pending_title():
+        return "Auto-shutdown not armed: another confirmation is waiting on screen."
+
+    def _start() -> str:
+        threading.Thread(target=_watch_and_shutdown,
+                         kwargs={"steam_path": steam_path, "speak": speak},
+                         daemon=True).start()
+        return "Auto-shutdown armed."
+    return confirm.request(key="auto_shutdown",
+                           title="Shut the PC down when the download finishes",
+                           detail="Steam download → power off", run=_start)
+
+
 def _watch_and_shutdown(steam_path: Path, speak=None,
                         check_interval: int = 30, timeout_hours: int = 12):
     print("[GameUpdater]...")
@@ -649,7 +671,7 @@ def _watch_and_shutdown(steam_path: Path, speak=None,
 
     for _ in range(24):
         time.sleep(5)
-        active = [g for g in _get_steam_games(steam_path) if g["state"] == 1026]
+        active = [g for g in _get_steam_games(steam_path) if _downloading(g["state"])]
         if active:
             names = ", ".join(g["name"] for g in active)
             if speak:
@@ -658,9 +680,11 @@ def _watch_and_shutdown(steam_path: Path, speak=None,
     else:
         return  
 
+    watched = {g["id"] for g in active}
     while time.time() < deadline:
         time.sleep(check_interval)
-        if not any(g["state"] == 1026 for g in _get_steam_games(steam_path)):
+        states = {g["id"]: g["state"] for g in _get_steam_games(steam_path)}
+        if all(_update_finished(states.get(i, 0)) for i in watched):
             if speak:
                 speak("Download complete. Shutting down now.")
             time.sleep(5)
@@ -1005,12 +1029,7 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                             steam_path, game_name=game_name, app_id=app_id
                         )
                         if shutdown:
-                            threading.Thread(
-                                target=_watch_and_shutdown,
-                                kwargs={"steam_path": steam_path, "speak": speak},
-                                daemon=True
-                            ).start()
-                            msg += " Auto-shutdown enabled."
+                            msg += " " + _arm_auto_shutdown(steam_path, speak)
                         if player: player.write_log(f"[GameUpdater] {msg[:100]}")
                         if speak:  speak(msg)
                         return msg
@@ -1027,12 +1046,7 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                         results.append(f"Steam: {_update_steam_games(steam_path)}")
 
                 if shutdown:
-                    threading.Thread(
-                        target=_watch_and_shutdown,
-                        kwargs={"steam_path": steam_path, "speak": speak},
-                        daemon=True
-                    ).start()
-                    results.append("Auto-shutdown enabled.")
+                    results.append(_arm_auto_shutdown(steam_path, speak))
 
         if platform in ("epic", "both"):
             if is_linux():

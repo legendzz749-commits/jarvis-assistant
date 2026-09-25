@@ -33,3 +33,41 @@ def test_update_of_a_game_not_in_steam_never_installs_something(monkeypatch, tmp
 def test_known_ids_do_not_map_to_the_wrong_games():
     assert "fortnite" not in gu._KNOWN_APPIDS
     assert "minecraft" not in gu._KNOWN_APPIDS
+
+
+def test_paused_or_queued_download_is_not_finished():
+    assert gu._update_finished(4)                  # installed, nothing pending
+    assert not gu._update_finished(4 | 2 | 512)    # paused mid-update
+    assert not gu._update_finished(4 | 2)          # queued
+    assert not gu._update_finished(4 | 2 | 1024)   # downloading
+
+
+def test_symlinked_steam_root_does_not_list_every_game_twice(tmp_path):
+    real = tmp_path / "real_steam"
+    (real / "steamapps").mkdir(parents=True)
+    (real / "steamapps" / "libraryfolders.vdf").write_text(f'"path"  "{real}"')
+    link = tmp_path / "dot_steam"
+    link.symlink_to(real)
+    assert len(gu._get_steam_libraries(link)) == 1
+
+
+def test_similar_names_do_not_resolve_to_a_different_known_game(monkeypatch):
+    monkeypatch.setattr(gu, "_find_steam_path", lambda: None)
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
+    result = gu._search_steam_appid("elden ring nightreign")
+    assert not result or result[1] != "ELDEN RING"
+
+
+def test_auto_shutdown_waits_for_a_human(monkeypatch):
+    from core import confirm
+    started = []
+    shown = []
+    confirm.bind(lambda t, d: shown.append(t), lambda: None)
+    monkeypatch.setattr(gu, "_watch_and_shutdown", lambda **k: started.append(1))
+    try:
+        reply = gu._arm_auto_shutdown(Path("/nonexistent"))
+        assert "CONFIRMATION_PENDING" in reply and started == [] and shown
+    finally:
+        confirm.resolve(False)
+        monkeypatch.setattr(confirm, "_show_cb", None)
