@@ -259,7 +259,11 @@ class VisemeStream:
                 self._cur = self._q.popleft()
                 self._carry -= 1.0
             if self._carry >= 1.0:
-                self._carry = 1.0          # queue empty — hold the last shape
+                # Queue empty and this shape's time is up: fall back to the
+                # audio-only mouth. Holding it kept a closure (m/b/p) shutting
+                # the jaw over loud speech, into the next reply.
+                self._carry = 1.0
+                self._cur = ("REST", 1.0)
 
             t_open, t_wide, closure = VISEMES.get(self._cur[0], VISEMES["REST"])
             if self._q or self._cur[0] != "REST":

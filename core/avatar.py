@@ -645,7 +645,8 @@ class HoloAvatar:
             return
 
         lm = self._lm
-        vis = 1.0 - self._blink
+        # _lids eases toward ~0.22 while asleep; it was computed but never drawn.
+        vis = max(0.0, min(1.0, self._lids)) * (1.0 - self._blink)
 
         # ── eyes ────────────────────────────────────────────────────────────
         for key in ("eye_l", "eye_r"):
