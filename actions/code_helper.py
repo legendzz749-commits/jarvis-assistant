@@ -19,6 +19,8 @@ MAX_BUILD_ATTEMPTS = 3
 # fallback ladder. Writing a model name here is what left this file hanging
 # forever whenever that one alias was unwell.
 from core import gemini
+from core.undo import push_undo
+from actions.file_controller import _UNDO_CONTENT_LIMIT, _undo_write
 
 
 def _get_api_key() -> str:
@@ -78,7 +80,16 @@ def _read_file(file_path: str) -> tuple[str, str]:
 def _save_file(path: Path, content: str) -> str:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Same undo contract as file_controller: snapshot the old bytes first.
+        previous, undoable = None, True
+        if path.exists():
+            if path.stat().st_size > _UNDO_CONTENT_LIMIT:
+                undoable = False
+            else:
+                previous = path.read_bytes()
         path.write_text(content, encoding="utf-8")
+        if undoable:
+            push_undo(f"wrote to {path.name}", _undo_write(path, previous))
         return f"Saved to: {path}"
     except Exception as e:
         return f"Could not save: {e}"
@@ -393,6 +404,12 @@ def _optimize_action(file_path, code, language, output_path, player) -> str:
             return err
     if not code:
         return "Please provide code or a file path to optimize, sir."
+    if len(code) > 6000:
+        # Only the first 6000 characters fit in the prompt; writing the reply
+        # back would silently delete everything after that point.
+        return ("That code is too long to optimize in one pass (over 6000 "
+                "characters) — the rest of the file would be lost. Point me at "
+                "a smaller file or a single function, sir.")
 
     if player:
         player.write_log("[Code] Optimizing code...")
@@ -503,13 +520,16 @@ Be specific and actionable. If you see an error message, quote it exactly."""
 
         if file_path and file_content:
 
-            code_match = re.search(r"```[a-zA-Z]*\n(.*?)```", analysis, re.DOTALL)
-            if code_match:
-                fixed_code = code_match.group(1).strip()
-                save_path  = Path(file_path)
-                _save_file(save_path, fixed_code)
-                analysis += f"\n\n✅ Fixed code has been saved to: {file_path}"
-                print(f"[Code] ✅ Fixed code saved: {file_path}")
+            # The analysis is free-form: its first block is often the quoted
+            # traceback and any block is based on a 4000-char excerpt. Save the
+            # last block NEXT TO the file for review — never over the original.
+            blocks = re.findall(r"```[a-zA-Z]*\n(.*?)```", analysis, re.DOTALL)
+            if blocks:
+                original  = Path(file_path)
+                save_path = original.with_name(f"{original.stem}.fixed{original.suffix}")
+                _save_file(save_path, blocks[-1].strip())
+                analysis += f"\n\n✅ Suggested fix saved next to your file: {save_path}"
+                print(f"[Code] ✅ Suggested fix saved: {save_path}")
 
         return analysis
 
