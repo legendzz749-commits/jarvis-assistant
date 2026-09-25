@@ -98,6 +98,16 @@ _CRYPTOJS_CDN  = ("https://cdnjs.cloudflare.com/ajax/libs/"
 _CRYPTOJS_FILE = STATIC_DIR / "crypto-js.min.js"
 
 
+async def _json_body(req) -> dict:
+    """The request's JSON object, or {} — malformed or non-object bodies used
+    to raise and answer 500."""
+    try:
+        body = await req.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 async def _serve_or_disable(cfg) -> None:
     """Run uvicorn inside JARVIS's loop. When the port is taken, uvicorn calls
     sys.exit() — inside this task that would end the whole assistant, not just
@@ -612,7 +622,7 @@ class DashboardServer:
 
         @app.post("/login")
         async def login(req: Request):
-            body    = await req.json()
+            body    = await _json_body(req)
             entered = str(body.get("pin", "")).strip().upper()
             now     = time.time()
             if entered in self._pending_keys and self._pending_keys[entered] > now:
@@ -723,15 +733,16 @@ class DashboardServer:
         async def command(req: Request):
             if not _auth(req):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
-            body  = await req.json()
+            body  = await _json_body(req)
             token = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
-            enc   = body.get("enc", "")
+            enc   = str(body.get("enc", "") or "")
             if enc:
                 text = self._decrypt(token, enc)
                 if text is None:
                     return JSONResponse({"error": "Decryption failed"}, status_code=400)
             else:
-                text = (body.get("text") or "").strip()
+                text = body.get("text")
+                text = text.strip() if isinstance(text, str) else ""
             if text:
                 await self._command_queue.put(text)
                 if self._wake_callback:
@@ -896,10 +907,14 @@ class DashboardServer:
                     break
             try:
                 while True:
-                    data = await websocket.receive_json()
-                    if data.get("type") == "command":
-                        enc = data.get("enc", "")
-                        t   = self._decrypt(tok, enc) if enc else (data.get("text") or "").strip()
+                    try:
+                        data = await websocket.receive_json()
+                    except (ValueError, KeyError):
+                        continue           # one malformed frame must not end the session
+                    if isinstance(data, dict) and data.get("type") == "command":
+                        enc = str(data.get("enc", "") or "")
+                        t   = self._decrypt(tok, enc) if enc else data.get("text")
+                        t   = t.strip() if isinstance(t, str) else ""
                         if t:
                             await self._command_queue.put(t)
                             if self._wake_callback:

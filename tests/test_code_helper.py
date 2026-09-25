@@ -86,3 +86,10 @@ def test_screenshot_is_not_left_on_the_desktop(tmp_path, monkeypatch):
     shot = ch._take_screenshot()
     assert shot is not None and tmp_path not in shot.parents
     shot.unlink()
+
+
+def test_home_relative_paths_are_expanded(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "script.py").write_text("print(1)")
+    assert ch._resolve_save_path("~/out.py", "python") == tmp_path / "out.py"
+    assert ch._read_file("~/script.py")[0] == "print(1)"

@@ -12,7 +12,7 @@ try:
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE    = 0.05
     _PYAUTOGUI = True
-except ImportError:
+except Exception:          # without a usable display pyautogui raises KeyError/XauthError
     _PYAUTOGUI = False
 
 try:
@@ -314,7 +314,10 @@ def snap_left():
         pyautogui.hotkey("ctrl", "option", "left")
     else:  # Linux
         try:
-            subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-e", "0,0,0,960,1080"],
+            w, h = pyautogui.size()          # not a hard-coded 1920×1080
+            subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-b", "remove,maximized_vert,maximized_horz"],
+                capture_output=True)
+            subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-e", f"0,0,0,{w // 2},{h}"],
                 capture_output=True)
         except Exception:
             pass
@@ -330,7 +333,10 @@ def snap_right():
         pyautogui.hotkey("ctrl", "option", "right")
     else:  # Linux
         try:
-            subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-e", "0,960,0,960,1080"],
+            w, h = pyautogui.size()
+            subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-b", "remove,maximized_vert,maximized_horz"],
+                capture_output=True)
+            subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-e", f"0,{w // 2},0,{w - w // 2},{h}"],
                 capture_output=True)
         except Exception:
             pass
@@ -468,9 +474,11 @@ def press_key(key: str): pyautogui.press(key)
 def type_text(text: str, press_enter_after: bool = False):
     if not text:
         return
+    previous = None
     copied = False
     if _PYPERCLIP:
         try:
+            previous = pyperclip.paste()
             pyperclip.copy(str(text))
             copied = True
         except pyperclip.PyperclipException:
@@ -478,6 +486,11 @@ def type_text(text: str, press_enter_after: bool = False):
     if copied:
         time.sleep(0.15)
         paste()
+        time.sleep(0.4)   # let the app read the clipboard before it is restored
+        try:
+            pyperclip.copy(previous or "")   # give the user back what they had copied
+        except pyperclip.PyperclipException:
+            pass
     else:
         pyautogui.write(str(text), interval=0.03)
     if press_enter_after:

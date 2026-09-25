@@ -1,6 +1,7 @@
 """Regression tests for the phone dashboard's upload/serve paths and the HUD drop zone."""
 import asyncio
 import socket
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -122,3 +123,24 @@ def test_without_cryptography_the_page_gets_no_cryptojs(dash, monkeypatch):
     d, client, _ = dash
     monkeypatch.setattr(server, "_CRYPTO_OK", False)
     assert client.get("/static/crypto.js", follow_redirects=False).status_code == 404
+
+
+@pytest.mark.parametrize("body", [b"{not json", b"[1, 2]", b'"pin"'])
+def test_malformed_json_is_a_client_error_not_a_crash(dash, body):
+    _, client, _ = dash
+    assert client.post("/login", content=body).status_code == 401
+    r = client.post("/api/command", content=body, headers={"Authorization": "Bearer good-token"})
+    assert r.status_code == 200
+
+
+def test_one_bad_websocket_frame_does_not_end_the_session(dash):
+    d, client, _ = dash
+    with client.websocket_connect("/ws?token=good-token") as ws:
+        ws.send_text("{not json")
+        ws.send_json({"type": "command", "text": 42})
+        ws.send_json(["not", "an", "object"])
+        ws.send_json({"type": "command", "text": "lights on"})
+        deadline = time.monotonic() + 5
+        while d._command_queue.empty() and time.monotonic() < deadline:
+            time.sleep(0.02)
+    assert d._command_queue.get_nowait() == "lights on"

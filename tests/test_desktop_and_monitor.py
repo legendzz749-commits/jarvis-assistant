@@ -121,3 +121,38 @@ def test_desktop_ini_is_left_alone_on_windows(desk, monkeypatch):
     (desk / "desktop.ini").write_text("[.ShellClassInfo]")
     desktop.organize_desktop()
     assert (desk / "desktop.ini").exists()
+
+
+@pytest.mark.parametrize("env", ["GNOME", "KDE", "XFCE"])
+def test_wallpaper_failure_is_reported(tmp_path, monkeypatch, env):
+    from types import SimpleNamespace
+    img = tmp_path / "wall.png"
+    img.write_bytes(b"x")
+    monkeypatch.setattr(desktop, "_OS", "Linux")
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", env)
+    monkeypatch.setattr(desktop.subprocess, "run",
+                        lambda argv, **k: SimpleNamespace(returncode=1, stdout=""))
+    assert not desktop.set_wallpaper(str(img)).startswith("Wallpaper set")
+
+
+def test_xfce_wallpaper_is_set_on_every_named_monitor(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    img = tmp_path / "wall.png"
+    img.write_bytes(b"x")
+    monkeypatch.setattr(desktop, "_OS", "Linux")
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "XFCE")
+    props = ["/backdrop/screen0/monitoreDP-1/workspace0/last-image",
+             "/backdrop/screen0/monitorHDMI-1/workspace0/last-image"]
+    calls = []
+    def run(argv, **k):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="\n".join(props + ["/backdrop/single-workspace-mode"]))
+    monkeypatch.setattr(desktop.subprocess, "run", run)
+    assert desktop.set_wallpaper(str(img)).startswith("Wallpaper set")
+    assert {c[4] for c in calls if "-s" in c} == set(props)
+
+
+def test_everyday_generated_code_runs_in_the_sandbox():
+    code = ("try:\n    raise PermissionError('locked')\nexcept PermissionError:\n"
+            "    print(round(2.345, 1), any([0, 1]), sorted(set([2, 1, 2])), sep=', ')")
+    assert desktop._execute_generated_code(code) == "2.3, True, [1, 2]"

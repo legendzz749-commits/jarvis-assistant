@@ -46,6 +46,12 @@ def _build_sandbox() -> dict:
         "isinstance": isinstance, "hasattr": hasattr, "getattr": getattr,
         "max": max, "min": min, "sum": sum, "abs": abs,
         "zip": zip, "map": map, "filter": filter,
+        "round": round, "any": any, "all": all, "set": set, "frozenset": frozenset,
+        "reversed": reversed, "next": next, "iter": iter, "repr": repr,
+        "divmod": divmod, "pow": pow, "chr": chr, "ord": ord,
+        "Exception": Exception, "OSError": OSError, "PermissionError": PermissionError,
+        "FileNotFoundError": FileNotFoundError, "FileExistsError": FileExistsError,
+        "ValueError": ValueError, "KeyError": KeyError,
     }
 
     sandbox = {
@@ -110,7 +116,8 @@ def _execute_generated_code(code: str, player=None) -> str:
 
     sandbox      = _build_sandbox()
     output_lines = []
-    sandbox["__builtins__"]["print"] = lambda *a: output_lines.append(" ".join(str(x) for x in a))
+    sandbox["__builtins__"]["print"] = (
+        lambda *a, sep=" ", end="\n", **_k: output_lines.append(sep.join(str(x) for x in a)))
 
     try:
         exec(compile(code, "<jarvis_desktop>", "exec"), sandbox)
@@ -172,6 +179,13 @@ Task: {task}"""
     except Exception as e:
         return f"ERROR: {e}"
 
+def _ran_ok(argv: list) -> bool:
+    try:
+        return subprocess.run(argv, capture_output=True, timeout=15).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def set_wallpaper(image_path: str) -> str:
     path = Path(image_path).expanduser().resolve()
     if not path.exists():
@@ -190,66 +204,70 @@ def set_wallpaper(image_path: str) -> str:
                     path = bmp_path
                 except ImportError:
                     pass 
-            ctypes.windll.user32.SystemParametersInfoW(20, 0, str(path), 3)
+            if not ctypes.windll.user32.SystemParametersInfoW(20, 0, str(path), 3):
+                return f"Could not set wallpaper: Windows rejected {path.name}."
             return f"Wallpaper set: {path.name}"
 
         elif _OS == "Darwin":
+            quoted = str(path).replace("\\", "\\\\").replace('"', '\\"')
             script = (
                 f'tell application "System Events" to tell every desktop to '
-                f'set picture to POSIX file "{path}"'
+                f'set picture to POSIX file "{quoted}"'
             )
-            subprocess.run(["osascript", "-e", script], capture_output=True)
+            if not _ran_ok(["osascript", "-e", script]):
+                return f"Could not set wallpaper: macOS refused {path.name}."
             return f"Wallpaper set: {path.name}"
 
         else:
             desktop_env = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
-            uri = f"file://{path}"
+            uri = path.as_uri()                     # percent-encodes spaces
 
             if "gnome" in desktop_env or "unity" in desktop_env:
-                subprocess.run([
-                    "gsettings", "set", "org.gnome.desktop.background",
-                    "picture-uri", uri
-                ], capture_output=True)
-                subprocess.run([
-                    "gsettings", "set", "org.gnome.desktop.background",
-                    "picture-uri-dark", uri
-                ], capture_output=True)
+                ok = _ran_ok(["gsettings", "set", "org.gnome.desktop.background",
+                              "picture-uri", uri])
+                # picture-uri-dark only exists on GNOME 42+, so it cannot decide success
+                _ran_ok(["gsettings", "set", "org.gnome.desktop.background",
+                         "picture-uri-dark", uri])
 
             elif "kde" in desktop_env:
-                # KDE Plasma
+                # plasma-apply-wallpaperimage is the supported tool (Plasma 5.24+);
+                # Plasma 6 renamed the D-Bus CLI to qdbus6.
                 script = f"""
 var allDesktops = desktops();
 for (var i = 0; i < allDesktops.length; i++) {{
     d = allDesktops[i];
     d.wallpaperPlugin = "org.kde.image";
     d.currentConfigGroup = ["Wallpaper", "org.kde.image", "General"];
-    d.writeConfig("Image", "file://{path}");
+    d.writeConfig("Image", {json.dumps(uri)});
 }}
 """
-                subprocess.run(
-                    ["qdbus", "org.kde.plasmashell", "/PlasmaShell",
-                     "org.kde.PlasmaShell.evaluateScript", script],
-                    capture_output=True
-                )
+                ok = (_ran_ok(["plasma-apply-wallpaperimage", str(path)])
+                      or any(_ran_ok([q, "org.kde.plasmashell", "/PlasmaShell",
+                                      "org.kde.PlasmaShell.evaluateScript", script])
+                             for q in ("qdbus6", "qdbus-qt6", "qdbus", "qdbus-qt5")))
 
             elif "xfce" in desktop_env:
-                subprocess.run([
-                    "xfconf-query", "-c", "xfce4-desktop",
-                    "-p", "/backdrop/screen0/monitor0/workspace0/last-image",
-                    "-s", str(path)
-                ], capture_output=True)
+                # XFCE 4.12+ keys backdrops by monitor name (monitoreDP-1, ...)
+                try:
+                    listing = subprocess.run(["xfconf-query", "-c", "xfce4-desktop", "-l"],
+                                             capture_output=True, text=True, timeout=15).stdout
+                except (OSError, subprocess.TimeoutExpired):
+                    listing = ""
+                props = [p for p in listing.split() if p.endswith("/last-image")]
+                ok = bool(props) and all(
+                    _ran_ok(["xfconf-query", "-c", "xfce4-desktop", "-p", p, "-s", str(path)])
+                    for p in props)
 
             else:
-                result = subprocess.run(
-                    ["feh", "--bg-scale", str(path)],
-                    capture_output=True
-                )
-                if result.returncode != 0:
+                ok = _ran_ok(["feh", "--bg-scale", str(path)])
+                if not ok:
                     return (
                         f"Could not set wallpaper automatically on {desktop_env}. "
                         f"Try manually or install 'feh'."
                     )
 
+            if not ok:
+                return f"Could not set wallpaper on {desktop_env or 'this desktop'}."
             return f"Wallpaper set: {path.name}"
 
     except Exception as e:

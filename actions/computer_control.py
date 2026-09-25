@@ -170,9 +170,8 @@ def _off_corner(x: int, y: int) -> tuple[int, int]:
 def _type(text: str, interval: float = 0.03) -> str:
     _require_pyautogui()
     time.sleep(0.3)
-    if not text.isascii() and _copy_to_clipboard(text):
-        # pyautogui can only type ASCII; anything else is silently dropped.
-        pyautogui.hotkey("command" if _get_os() == "mac" else "ctrl", "v")
+    # pyautogui can only type ASCII; anything else is silently dropped.
+    if not text.isascii() and _paste_via_clipboard(text):
         return f"Typed: {text[:60]}{'…' if len(text) > 60 else ''}"
     pyautogui.typewrite(text, interval=interval)
     return f"Typed: {text[:60]}{'…' if len(text) > 60 else ''}"
@@ -184,10 +183,7 @@ def _smart_type(text: str, clear_first: bool = True) -> str:
         _clear_field()
         time.sleep(0.1)
 
-    if (len(text) > 20 or not text.isascii()) and _copy_to_clipboard(text):
-        time.sleep(0.1)
-        paste_key = "command" if _get_os() == "mac" else "ctrl"
-        pyautogui.hotkey(paste_key, "v")
+    if (len(text) > 20 or not text.isascii()) and _paste_via_clipboard(text):
         return f"Smart-typed (clipboard): {text[:60]}{'…' if len(text) > 60 else ''}"
 
     pyautogui.typewrite(text, interval=0.04)
@@ -258,12 +254,26 @@ def _copy_to_clipboard(text: str) -> bool:
         return False
 
 
+def _paste_via_clipboard(text: str) -> bool:
+    """Paste text with the paste shortcut, then give the user back what they
+    had copied. False when there is no clipboard backend."""
+    try:
+        previous = pyperclip.paste() if _PYPERCLIP else None
+    except pyperclip.PyperclipException:
+        previous = None
+    if not _copy_to_clipboard(text):
+        return False
+    time.sleep(0.1)
+    pyautogui.hotkey("command" if _get_os() == "mac" else "ctrl", "v")
+    time.sleep(0.4)          # let the app read the clipboard before it is restored
+    if previous is not None:
+        _copy_to_clipboard(previous)
+    return True
+
+
 def _clipboard_paste(text: str) -> str:
-    if _copy_to_clipboard(text):
-        time.sleep(0.1)
-        _require_pyautogui()
-        paste_key = "command" if _get_os() == "mac" else "ctrl"
-        pyautogui.hotkey(paste_key, "v")
+    _require_pyautogui()
+    if _paste_via_clipboard(text):
         return f"Pasted: {text[:60]}{'…' if len(text) > 60 else ''}"
     return "No clipboard available (on Linux install xclip, xsel or wl-clipboard)."
 

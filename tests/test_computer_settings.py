@@ -151,11 +151,12 @@ def test_non_ascii_text_is_pasted_not_dropped(monkeypatch):
     from actions import computer_control as cc
     typed, pasted = [], []
     monkeypatch.setattr(cc, "_copy_to_clipboard", lambda t: pasted.append(t) or True)
+    monkeypatch.setattr(cc.pyperclip, "paste", lambda: "what the user copied")
     monkeypatch.setattr(cc.pyautogui, "typewrite", lambda t, **k: typed.append(t))
     monkeypatch.setattr(cc.pyautogui, "hotkey", lambda *a: None)
     monkeypatch.setattr(cc.time, "sleep", lambda _s: None)
     cc._type("Günaydın")
-    assert pasted == ["Günaydın"] and typed == []
+    assert pasted == ["Günaydın", "what the user copied"] and typed == []
 
 
 @pytest.mark.parametrize("typo,action", [("fullscren", "full_screen"), ("volumeup", "volume_up")])
@@ -223,3 +224,25 @@ def test_linux_focus_reports_when_no_window_matched(monkeypatch):
         return types.SimpleNamespace(returncode=1)
     monkeypatch.setattr(cc.subprocess, "run", run)
     assert "No window" in cc._focus_window("Nonexistent")
+
+
+@pytest.mark.parametrize("fn,geometry", [("snap_left", "0,0,0,1280,1440"),
+                                         ("snap_right", "0,1280,0,1280,1440")])
+def test_linux_snap_uses_the_real_screen_size(monkeypatch, fn, geometry):
+    monkeypatch.setattr(cs, "_OS", "Linux")
+    monkeypatch.setattr(cs.pyautogui, "size", lambda: (2560, 1440))
+    calls = []
+    monkeypatch.setattr(cs.subprocess, "run", lambda argv, **k: calls.append(argv))
+    getattr(cs, fn)()
+    assert ["wmctrl", "-r", ":ACTIVE:", "-e", geometry] in calls
+    assert calls.index(["wmctrl", "-r", ":ACTIVE:", "-b", "remove,maximized_vert,maximized_horz"]) == 0
+
+
+def test_type_text_gives_back_the_users_clipboard(monkeypatch):
+    board = ["what the user copied"]
+    monkeypatch.setattr(cs.pyperclip, "paste", lambda: board[-1])
+    monkeypatch.setattr(cs.pyperclip, "copy", board.append)
+    monkeypatch.setattr(cs, "paste", lambda: None)
+    monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
+    cs.type_text("hello there")
+    assert board == ["what the user copied", "hello there", "what the user copied"]

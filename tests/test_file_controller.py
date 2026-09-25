@@ -1,4 +1,6 @@
 """Regression tests: file actions must never destroy a file the user already had."""
+import sys
+
 import pytest
 
 from actions import file_controller as fc
@@ -175,3 +177,10 @@ def test_a_broken_symlink_does_not_break_the_listing(home):
     (home / "Documents" / "gone").symlink_to(home / "nowhere")
     out = fc.list_files(str(home / "Documents"))
     assert "real.txt" in out and "broken link" in out
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux stat has no birth time")
+def test_inode_change_time_is_not_called_the_creation_date(home):
+    (home / "Desktop" / "a.txt").write_text("x")
+    info = fc.get_file_info(str(home / "Desktop"), "a.txt")
+    assert "Created" not in info and "Changed" in info

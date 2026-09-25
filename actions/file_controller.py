@@ -704,12 +704,17 @@ def get_file_info(path: str, name: str = "") -> str:
             return f"Not found: {target.name}"
 
         stat = target.stat()
+        born = getattr(stat, "st_birthtime", None)       # macOS, Windows on 3.12+
+        if born is None and os.name == "nt":
+            born = stat.st_ctime                         # creation time on Windows
+        # On Linux st_ctime is the last metadata change, not the creation time.
+        stamp = ("Created", born) if born is not None else ("Changed", stat.st_ctime)
         info = {
             "Name":      target.name,
             "Type":      "Folder" if target.is_dir() else "File",
             "Size":      _format_size(stat.st_size),
             "Location":  str(target.parent),
-            "Created":   datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M"),
+            stamp[0]:    datetime.fromtimestamp(stamp[1]).strftime("%Y-%m-%d %H:%M"),
             "Modified":  datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
             "Extension": target.suffix or "—",
         }
