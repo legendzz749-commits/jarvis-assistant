@@ -80,6 +80,21 @@ def _build_sandbox() -> dict:
     return sandbox
 
 
+def _confirm_and_execute(task: str, code: str, player=None) -> str:
+    """Model-written code cannot be sandboxed in-process — os is reachable
+    through os.path and Path can delete — so it only runs after the user reads
+    it on the HUD and presses CONFIRM."""
+    from core import confirm
+    if confirm.pending_title():
+        return ("There is already a confirmation waiting on screen. "
+                "Ask the user to answer that one first.")
+    preview = "\n".join(code.strip().splitlines()[:12])
+    return confirm.request(
+        key="desktop_task", title=f"Run desktop task: {task[:80]}", detail=preview,
+        run=lambda: _execute_generated_code(code, player=player),
+    )
+
+
 def _execute_generated_code(code: str, player=None) -> str:
     if not code or code.strip() == "UNSAFE":
         return "This action cannot be performed safely."
@@ -469,12 +484,12 @@ def desktop_control(
                 player.write_log("[Desktop] Generating action...")
 
             code = _ask_gemini_for_desktop_action(actual_task)
-            return _execute_generated_code(code, player=player)
+            return _confirm_and_execute(actual_task, code, player=player)
 
         else:
             if action:
                 code = _ask_gemini_for_desktop_action(action)
-                return _execute_generated_code(code, player=player)
+                return _confirm_and_execute(action, code, player=player)
             return "No action or task specified."
 
     except Exception as e:

@@ -227,7 +227,7 @@ Code for {file_path}:"""
         response = model.generate_content(prompt)
         code = _strip_fences(response.text)
 
-        full_path = project_dir / file_path
+        full_path = _in_project(project_dir, file_path)
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(code, encoding="utf-8")
 
@@ -239,7 +239,28 @@ Code for {file_path}:"""
             raise RateLimitError(str(e))
         raise
 
+def _in_project(project_dir: Path, rel_path: str) -> Path:
+    """Resolve a planner-supplied path, refusing anything outside the project
+    ("../../.bashrc", absolute paths) — the plan is model output."""
+    full = (project_dir / rel_path).resolve()
+    if not full.is_relative_to(project_dir.resolve()):
+        raise ValueError(f"refusing to write outside the project: {rel_path}")
+    return full
+
+
+# A requirement such as "requests", "flask>=2.0" or "uvicorn[standard]". Anything
+# else — "--index-url=…", a URL, a path — is a pip option, not a package.
+_REQUIREMENT = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?"
+    r"([<>=!~]=?[A-Za-z0-9.*+!_-]+)?(,[<>=!~]=?[A-Za-z0-9.*+!_-]+)*"
+)
+
+
 def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
+    rejected = [d for d in dependencies if not _REQUIREMENT.fullmatch(d.replace(" ", ""))]
+    if rejected:
+        print(f"[DevAgent] ⚠️ Ignoring non-package dependency entries: {rejected}")
+    dependencies = [d for d in dependencies if d not in rejected]
     if not dependencies:
         return "No external dependencies."
 
@@ -299,8 +320,12 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
     print(f"[DevAgent] 🚀 Running: {run_command}")
     try:
         parts = run_command.split()
-        if parts[0].lower() == "python":
+        interpreter = parts[0].lower() if parts else ""
+        if interpreter in ("python", "python3", "py"):
             parts[0] = sys.executable
+        elif interpreter != "node":
+            return (f"Refusing to run '{run_command}': only python or node "
+                    f"entry points are run automatically.")
 
         result = subprocess.run(
             parts,
@@ -425,7 +450,7 @@ Fixed code for {fix_path}:"""
             response = model.generate_content(prompt)
             fixed = _strip_fences(response.text)
 
-            full_path = project_dir / fix_path
+            full_path = _in_project(project_dir, fix_path)
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(fixed, encoding="utf-8")
 

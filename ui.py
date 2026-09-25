@@ -1976,6 +1976,7 @@ class ConfirmBanner(_HudOverlay):
         lay.addWidget(hdr)
 
         ttl = QLabel(title)
+        ttl.setTextFormat(Qt.TextFormat.PlainText)
         ttl.setWordWrap(True)
         ttl.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
         ttl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
@@ -1983,6 +1984,7 @@ class ConfirmBanner(_HudOverlay):
 
         if detail:
             dtl = QLabel(detail)
+            dtl.setTextFormat(Qt.TextFormat.PlainText)   # previews may hold code/HTML
             dtl.setWordWrap(True)
             dtl.setFont(QFont("Courier New", 8))
             dtl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")

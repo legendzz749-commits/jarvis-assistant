@@ -740,8 +740,13 @@ def _process_archive(path: Path, action: str, params: dict, speak=None) -> str:
         dest = Path(params.get("destination", str(path.parent / path.stem)))
         dest.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.unpack_archive(path, dest)
+            # filter="data" rejects members that escape dest ("../", absolute
+            # paths, links out). Without it, 3.11–3.13 trust the archive fully.
+            shutil.unpack_archive(path, dest, filter="data")
             return f"Extracted to: {dest}"
+        except TypeError:
+            return ("Extract refused: this Python has no safe-extraction filter. "
+                    "Update to Python 3.11.4 or newer.")
         except Exception as e:
             return f"Extract failed: {e}"
 
