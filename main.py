@@ -612,6 +612,7 @@ class JarvisLive:
         self.ui.on_interrupt      = self.interrupt
         self.ui.on_voice_change   = self._on_voice_change     # voice picker → rebuild session
         self.ui.on_audio_device_change = self._on_audio_device_change
+        self.ui.on_plugins_change = lambda: self.request_reconnect(keep_context=True, reason="plugin change")
         self._reconnect_event: asyncio.Event | None = None
         self._reconnect_keep = True   # False → next rebuild drops the resumption handle
 
@@ -1955,7 +1956,7 @@ class JarvisLive:
                 )
                 if not failed:
                     # Show on UI content panel immediately
-                    self.ui.show_content("NEWS — top world news today", news_text)
+                    self.ui.show_content("NEWS — TOP WORLD NEWS TODAY", news_text)
 
                     p2 = (
                         f"[BRIEFING] Here are today's top news headlines:\n{news_text}\n\n"
