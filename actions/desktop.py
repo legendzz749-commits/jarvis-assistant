@@ -8,6 +8,9 @@ import tempfile
 import platform
 from pathlib import Path
 from datetime import datetime
+from types import SimpleNamespace
+
+from core.undo import push_undo
 
 try:
     import pyautogui
@@ -52,11 +55,9 @@ def _build_sandbox() -> dict:
         "__builtins__": safe_builtins,
         "Path": Path,
         "time": time,
-        "shutil": type("shutil", (), {
-            "copy2":      shutil.copy2,
-            "copytree":   shutil.copytree,
-            "disk_usage": shutil.disk_usage,
-        })(),
+        # A class instance would bind these as methods (self = first arg).
+        "shutil": SimpleNamespace(copy2=shutil.copy2, copytree=shutil.copytree,
+                                  disk_usage=shutil.disk_usage),
         "os_path": os.path,  
     }
 
@@ -254,16 +255,23 @@ for (var i = 0; i < allDesktops.length; i++) {{
 
 def set_wallpaper_from_url(url: str) -> str:
     try:
+        import hashlib
         import urllib.request
-        suffix = Path(url.split("?")[0]).suffix or ".jpg"
-        tmp    = Path(tempfile.mktemp(suffix=suffix))
-        urllib.request.urlretrieve(url, str(tmp))
-        result = set_wallpaper(str(tmp))
-        try:
-            tmp.unlink()
-        except Exception:
-            pass
-        return result
+        if not url.lower().startswith(("http://", "https://")):
+            return "Only http(s) image links can be used as a wallpaper."
+        suffix = Path(url.split("?")[0]).suffix.lower() or ".jpg"
+        # Kept, not deleted: the OS reads the wallpaper file again later (on
+        # login, on a display change), so deleting it blanks the desktop.
+        folder = Path.home() / "Pictures" / "JARVIS Wallpapers"
+        folder.mkdir(parents=True, exist_ok=True)
+        dest = folder / (hashlib.sha1(url.encode()).hexdigest()[:16] + suffix)
+        # A timeout and a size cap: this runs inside a voice tool call.
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            data = resp.read(_WALLPAPER_MAX_BYTES + 1)
+        if len(data) > _WALLPAPER_MAX_BYTES:
+            return "That image is too large to use as a wallpaper (over 25 MB)."
+        dest.write_bytes(data)
+        return set_wallpaper(str(dest))
     except Exception as e:
         return f"Could not download wallpaper: {e}"
 
@@ -321,10 +329,48 @@ _SKIP_EXTENSIONS = {
 }
 
 
+_WALLPAPER_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _move_journaled(item: Path, new_path: Path, journal: list, failed: list) -> bool:
+    """One move of a bulk operation: a failure is recorded, not fatal."""
+    try:
+        shutil.move(str(item), str(new_path))
+    except OSError as e:
+        print(f"[Desktop] Could not move {item.name}: {e}")
+        failed.append(item.name)
+        return False
+    journal.append((item, new_path))
+    return True
+
+
+def _push_bulk_undo(label: str, journal: list, created: set) -> None:
+    """One undo that puts every file back and removes folders it made (if empty)."""
+    if not journal:
+        return
+
+    def _undo():
+        restored = 0
+        for src, dst in journal:
+            if dst.exists() and not src.exists():
+                shutil.move(str(dst), str(src))
+                restored += 1
+        for folder in created:
+            try:
+                if folder.is_dir() and not any(folder.iterdir()):
+                    folder.rmdir()
+            except OSError:
+                pass
+        return f"{restored} file(s) put back on the desktop."
+    push_undo(label, _undo)
+
+
 def organize_desktop(mode: str = "by_type") -> str:
     desktop       = _get_desktop()
     skip_exts     = _SKIP_EXTENSIONS.get(_OS, set())
-    moved, skipped = [], []
+    moved, skipped, failed = [], [], []
+    journal: list = []
+    created: set = set()
 
     for item in desktop.iterdir():
         if item.is_dir() or item.name.startswith("."):
@@ -344,16 +390,19 @@ def organize_desktop(mode: str = "by_type") -> str:
                     break
 
         target_dir = desktop / folder_name
-        target_dir.mkdir(exist_ok=True)
+        if not target_dir.exists():
+            target_dir.mkdir()
+            created.add(target_dir)
         new_path = target_dir / item.name
 
         if new_path.exists():
             skipped.append(item.name)
             continue
 
-        shutil.move(str(item), str(new_path))
-        moved.append(f"{item.name} → {folder_name}/")
+        if _move_journaled(item, new_path, journal, failed):
+            moved.append(f"{item.name} → {folder_name}/")
 
+    _push_bulk_undo(f"organized the desktop ({len(journal)} files)", journal, created)
     result = f"Desktop organized ({mode}): {len(moved)} files moved."
     if moved:
         result += "\n" + "\n".join(moved[:8])
@@ -361,6 +410,8 @@ def organize_desktop(mode: str = "by_type") -> str:
             result += f"\n... and {len(moved) - 8} more."
     if skipped:
         result += f"\n{len(skipped)} file(s) skipped (name conflict)."
+    if failed:
+        result += f"\n{len(failed)} file(s) could not be moved: {', '.join(failed[:5])}."
     return result
 
 
@@ -394,9 +445,11 @@ def clean_desktop() -> str:
     skip_exts   = _SKIP_EXTENSIONS.get(_OS, set())
     today       = datetime.now().strftime("%Y-%m-%d")
     archive_dir = desktop / f"Desktop Archive {today}"
+    created = set() if archive_dir.exists() else {archive_dir}
     archive_dir.mkdir(exist_ok=True)
 
-    moved = 0
+    journal: list = []
+    failed: list = []
     for item in desktop.iterdir():
         if item.is_dir() or item.name.startswith("."):
             continue
@@ -404,10 +457,13 @@ def clean_desktop() -> str:
             continue
         new_path = archive_dir / item.name
         if not new_path.exists():
-            shutil.move(str(item), str(new_path))
-            moved += 1
+            _move_journaled(item, new_path, journal, failed)
 
-    return f"Desktop cleaned: {moved} files archived to '{archive_dir.name}'."
+    _push_bulk_undo(f"cleaned the desktop ({len(journal)} files)", journal, created)
+    result = f"Desktop cleaned: {len(journal)} files archived to '{archive_dir.name}'."
+    if failed:
+        result += f" {len(failed)} could not be moved: {', '.join(failed[:5])}."
+    return result
 
 
 def get_desktop_stats() -> str:
