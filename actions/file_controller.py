@@ -25,6 +25,9 @@ def _undo_move(src: Path, dst: Path):
     def _fn():
         if not dst.exists():
             return f"'{dst.name}' is no longer there — nothing moved back."
+        if src.exists():
+            return (f"Something new is at '{src.name}' in {src.parent.name}/ now — "
+                    f"not moving back over it.")
         src.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(dst), str(src))
         return f"'{src.name}' is back in {src.parent.name}/."
@@ -86,8 +89,29 @@ def _restore_from_trash(original: Path) -> str:
                         return f"'{original.name}' restored from the Recycle Bin."
         except Exception as e:
             print(f"[file] Recycle Bin restore failed: {e}")
-    return (f"'{original.name}' is in the Recycle Bin — I could not pull it back "
-            f"automatically, but it is there and can be restored by hand.")
+    elif _OS == "Linux":
+        # freedesktop.org trash: files/<name> plus info/<name>.trashinfo with Path=
+        from urllib.parse import unquote
+        trash = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "Trash"
+        infos = sorted((trash / "info").glob("*.trashinfo"),
+                       key=lambda f: f.stat().st_mtime, reverse=True)
+        for info in infos:
+            line = next((ln for ln in info.read_text(encoding="utf-8", errors="replace").splitlines()
+                         if ln.startswith("Path=")), "")
+            stored = trash / "files" / info.stem
+            if unquote(line[5:]) == str(original) and stored.exists() and not original.exists():
+                original.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(stored), str(original))
+                info.unlink(missing_ok=True)
+                return f"'{original.name}' restored from the Trash."
+    elif _OS == "Darwin":
+        stored = Path.home() / ".Trash" / original.name
+        if stored.exists() and not original.exists():
+            shutil.move(str(stored), str(original))
+            return f"'{original.name}' restored from the Trash."
+    # Raising makes undo say it could not undo, instead of "Undone: …".
+    raise RuntimeError(f"'{original.name}' is in the Trash / Recycle Bin but could not be "
+                       f"pulled back automatically — restore it from there by hand")
 
 
 _SAFE_ROOTS: list[Path] = [
@@ -234,15 +258,19 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
             return f"Access denied: {target}"
         target.parent.mkdir(parents=True, exist_ok=True)
         existed = target.exists()
-        previous = None
+        previous, undoable = None, True
         if existed:
             try:
-                previous = target.read_bytes()
+                if target.stat().st_size > _UNDO_CONTENT_LIMIT:
+                    undoable = False
+                else:
+                    previous = target.read_bytes()
             except Exception:
-                previous = None
+                undoable = False     # None would mean "did not exist" and undo would delete it
         target.write_text(content, encoding="utf-8")
-        push_undo(f"created {target.name}",
-                  _undo_write(target, previous) if existed else _undo_create(target))
+        if undoable:
+            push_undo(f"created {target.name}",
+                      _undo_write(target, previous) if existed else _undo_create(target))
         return f"File created: {target.name}"
     except Exception as e:
         return f"Could not create file: {e}"
@@ -347,6 +375,9 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
         if dst.exists():
             return f"'{dst.name}' already exists in {dst.parent.name}/ — not overwriting it."
 
+        if src.is_dir() and dst.resolve().is_relative_to(src.resolve()):
+            return f"Cannot copy '{src.name}' into itself."
+
         dst.parent.mkdir(parents=True, exist_ok=True)
 
         if src.is_dir():
@@ -382,6 +413,8 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
             return f"Not found: {target.name}"
         if not new_name:
             return "No new name provided."
+        if Path(new_name).name != new_name or new_name in (".", ".."):
+            return "The new name must be a plain name, not a path — use move for that."
 
         new_path = target.parent / new_name
         if new_path.exists():
@@ -408,9 +441,11 @@ def read_file(path: str, name: str = "", max_chars: int = 4000) -> str:
         if not target.is_file():
             return f"Not a file: {target.name}"
 
-        content = target.read_text(encoding="utf-8", errors="ignore")
+        with open(target, encoding="utf-8", errors="ignore") as f:
+            content = f.read(max_chars + 1)
         if len(content) > max_chars:
-            content = content[:max_chars] + f"\n\n[Truncated — {len(content)} total chars]"
+            size = _format_size(target.stat().st_size)
+            content = content[:max_chars] + f"\n\n[Truncated — file is {size}]"
         return content
 
     except Exception as e:
@@ -571,8 +606,9 @@ def organize_desktop() -> str:
     }
 
     desktop = _get_desktop()
-    moved, skipped = [], []
+    moved, skipped, failed = [], [], []
     journal: list[tuple[Path, Path]] = []   # (where it was, where it went)
+    created: set[Path] = set()              # folders this run made — the only ones undo may remove
 
     try:
         for item in desktop.iterdir():
@@ -589,15 +625,21 @@ def organize_desktop() -> str:
                     target_dir = desktop / folder
                     break
 
-            target_dir.mkdir(exist_ok=True)
             new_path = target_dir / item.name
-
             if new_path.exists():
                 skipped.append(item.name)
                 continue
 
             origin = item.resolve()
-            shutil.move(str(item), str(new_path))
+            try:
+                if not target_dir.exists():
+                    target_dir.mkdir()
+                    created.add(target_dir.resolve())
+                shutil.move(str(item), str(new_path))
+            except Exception as e:           # open in another app, permissions…
+                print(f"[file] organize: {item.name}: {e}")
+                failed.append(item.name)
+                continue
             journal.append((origin, new_path.resolve()))
             moved.append(f"{item.name} → {target_dir.name}/")
 
@@ -618,7 +660,7 @@ def organize_desktop() -> str:
                         print(f"[file] undo organize: {moved_to.name}: {e}")
                 # Clear away the folders we created, but only while they are
                 # empty — anything the user put in since stays.
-                for folder in {m.parent for _o, m in entries}:
+                for folder in {m.parent for _o, m in entries} & created:
                     try:
                         if folder.exists() and folder.is_dir() and not any(folder.iterdir()):
                             folder.rmdir()
@@ -635,6 +677,8 @@ def organize_desktop() -> str:
                 result += f"\n... and {len(moved) - 8} more."
         if skipped:
             result += f"\n{len(skipped)} file(s) skipped (name conflict)."
+        if failed:
+            result += f"\n{len(failed)} file(s) could not be moved: {', '.join(failed[:5])}."
         return result
 
     except Exception as e:
@@ -767,6 +811,10 @@ TOOL = {
             "content": {
                 "type": "STRING",
                 "description": "Content for create_file/write"
+            },
+            "append": {
+                "type": "BOOLEAN",
+                "description": "write only: add content to the end instead of replacing the file"
             },
             "name": {
                 "type": "STRING",
