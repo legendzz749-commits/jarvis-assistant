@@ -1,8 +1,10 @@
 """
 dashboard/server.py — JARVIS Local HTTP Dashboard
 
-Plain HTTP on port 8000 (no SSL warnings, no firewall issues).
-Security at the application layer: AES-256-CBC with session-key-derived key.
+HTTPS on port 8000 with a self-signed certificate generated on first run
+(plain HTTP only if the cryptography package is missing). TLS is what protects
+the traffic: the AES layer below is derived from the 6-character pairing code,
+which is itself sent over that connection, so it adds no secrecy of its own.
 CryptoJS is auto-downloaded once and served locally — no CDN needed after that.
 
 Install deps:  pip install fastapi "uvicorn[standard]" cryptography
@@ -28,17 +30,15 @@ except ImportError:
     pass
 
 # python-multipart is required for file uploads — optional dependency
-_UPLOAD_OK = False
-try:
-    from fastapi import UploadFile, File as FastAPIFile  # noqa: F401 — availability probe
-    _UPLOAD_OK = True
-except Exception:
-    pass
+# (fastapi itself always imports; what uploads need is the multipart parser)
+import importlib.util as _ilu
+_UPLOAD_OK = bool(_ilu.find_spec("python_multipart") or _ilu.find_spec("multipart"))
 
 BASE_DIR    = Path(__file__).resolve().parent.parent
 STATIC_DIR  = Path(__file__).parent / "static"
 PORT        = 8000
 MAX_UPLOAD_MB = 500
+_MAX_FAILED_LOGINS = 5
 
 
 def _make_uploads_dir() -> Path:
@@ -116,7 +116,7 @@ def _ensure_network_access(port: int) -> None:
     macOS   : osascript admin dialog if the Application Firewall is on.
     Linux   : pkexec GUI → sudo -n → prints manual command as fallback.
     """
-    import sys, subprocess, os, tempfile, threading
+    import sys, subprocess, os, shutil, tempfile, threading
 
     # ── Windows ──────────────────────────────────────────────────────────────
     if sys.platform == "win32":
@@ -268,7 +268,11 @@ def _ensure_network_access(port: int) -> None:
 
     try:  # ufw
         r = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=5)
-        if "active" in r.stdout.lower():
+        if r.returncode != 0 and shutil.which("ufw"):
+            # `ufw status` needs root, so a normal user cannot even tell.
+            print(f"[Dashboard] If ufw is enabled, run:  sudo ufw allow {port}/tcp")
+            return
+        if re.search(r"^Status: active", r.stdout, re.MULTILINE):   # not "inactive"
             if _privileged(["ufw", "allow", f"{port}/tcp"]):
                 print(f"[Dashboard] ufw: port {port} allowed.")
             else:
@@ -282,6 +286,10 @@ def _ensure_network_access(port: int) -> None:
             ["firewall-cmd", "--state"], capture_output=True, text=True, timeout=5,
         )
         if "running" in r.stdout.lower():
+            q = subprocess.run(["firewall-cmd", "--query-port", f"{port}/tcp"],
+                               capture_output=True, text=True, timeout=5)
+            if q.stdout.strip() == "yes":
+                return      # already open — no password prompt on every launch
             ok = (_privileged(["firewall-cmd", "--add-port", f"{port}/tcp", "--permanent"])
                   and _privileged(["firewall-cmd", "--reload"]))
             if ok:
@@ -356,6 +364,22 @@ def _local_ip() -> str:
     return "127.0.0.1"
 
 
+def _cert_needs_renewal(crt_p) -> bool:
+    """Certificates made by earlier versions lack serverAuth and run 10 years,
+    which iOS/macOS refuse; regenerate those (and any within 30 days of expiry)."""
+    try:
+        import datetime
+        from cryptography import x509
+        cert = x509.load_pem_x509_certificate(crt_p.read_bytes())
+        cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
+        left = cert.not_valid_after_utc - datetime.datetime.now(datetime.timezone.utc)
+        return left < datetime.timedelta(days=30)
+    except ImportError:
+        return False
+    except Exception:
+        return True
+
+
 def _ensure_certs() -> bool:
     """
     Make sure config/certs holds a TLS key pair, generating a self-signed one the
@@ -372,7 +396,7 @@ def _ensure_certs() -> bool:
     certs = BASE_DIR / "config" / "certs"
     key_p = certs / "jarvis.key"
     crt_p = certs / "jarvis.crt"
-    if key_p.exists() and crt_p.exists():
+    if key_p.exists() and crt_p.exists() and not _cert_needs_renewal(crt_p):
         return True
 
     try:
@@ -381,7 +405,7 @@ def _ensure_certs() -> bool:
         from cryptography import x509
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
-        from cryptography.x509.oid import NameOID
+        from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
     except ImportError:
         print("[Dashboard] cryptography not installed — serving over plain HTTP.")
         print("[Dashboard] For HTTPS run:  pip install cryptography")
@@ -417,9 +441,16 @@ def _ensure_certs() -> bool:
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - datetime.timedelta(days=1))
-            .not_valid_after(now + datetime.timedelta(days=3650))
+            # Apple platforms reject TLS certs valid > 825 days or without the
+            # serverAuth usage — iPhone browsers would refuse the dashboard.
+            .not_valid_after(now + datetime.timedelta(days=825))
             .add_extension(x509.SubjectAlternativeName(alt), critical=False)
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(x509.KeyUsage(digital_signature=True, key_encipherment=True,
+                                         content_commitment=False, data_encipherment=False,
+                                         key_agreement=False, key_cert_sign=False, crl_sign=False,
+                                         encipher_only=False, decipher_only=False), critical=True)
             .sign(key, hashes.SHA256())
         )
 
@@ -472,11 +503,21 @@ class DashboardServer:
     # ── one-time key management ───────────────────────────────────────────
 
     def new_key(self, expiry_secs: int = 600) -> str:
-        now = time.time()
-        self._pending_keys = {k: v for k, v in self._pending_keys.items() if v > now}
+        # Only the newest code is valid: every press used to add another live
+        # code, multiplying the odds of a guess.
         key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(6))
-        self._pending_keys[key] = now + expiry_secs
+        self._pending_keys = {key: time.time() + expiry_secs}
+        self._failed_logins = 0
         return key
+
+    def _login_failed(self) -> None:
+        """A 6-character code is guessable given unlimited tries; after a few
+        wrong ones the code is burned and a new one must be shown."""
+        self._failed_logins = getattr(self, "_failed_logins", 0) + 1
+        if self._failed_logins >= _MAX_FAILED_LOGINS:
+            self._pending_keys.clear()
+            self._failed_logins = 0
+            print("[Dashboard] Too many wrong pairing codes — code cancelled.")
 
     @staticmethod
     def _ssl_enabled() -> bool:
@@ -579,6 +620,7 @@ class DashboardServer:
                 ))
                 # Bearer token in response body — no cookies needed (works on any browser/HTTP)
                 return JSONResponse({"ok": True, "token": tok})
+            self._login_failed()
             return JSONResponse({"ok": False, "error": "Invalid or expired key"},
                                 status_code=401)
 
@@ -587,6 +629,8 @@ class DashboardServer:
             """QR code target — validates one-time key, creates session, redirects phone."""
             now = time.time()
             if not key or key not in self._pending_keys or self._pending_keys[key] <= now:
+                if key:
+                    self._login_failed()
                 return HTMLResponse("""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width">
 <style>
@@ -658,6 +702,13 @@ class DashboardServer:
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
             count = len(self._device_sessions)
             self._device_sessions.clear()
+            # The bearer tokens those devices were given are what grant access;
+            # clearing only the device records left every one of them working.
+            caller = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            for tok in list(self._tokens):
+                if tok != caller:
+                    self._tokens.discard(tok)
+                    self._token_keys.pop(tok, None)
             return JSONResponse({"ok": True, "revoked": count})
 
         @app.post("/api/command")

@@ -74,3 +74,45 @@ def test_drop_zone_survives_its_file_disappearing(qapp, tmp_path, pump):
 
     canvas = zone.findChild(ui._DropCanvas)
     canvas.grab()                                       # forces a paintEvent
+
+
+def test_pairing_code_is_burned_after_repeated_wrong_guesses(dash):
+    d, client, _ = dash
+    code = d.new_key()
+    for guess in ("AAAAAA", "BBBBBB", "CCCCCC", "DDDDDD", "EEEEEE"):
+        assert client.post("/login", json={"pin": guess}).status_code == 401
+    assert client.post("/login", json={"pin": code}).status_code == 401
+
+
+def test_only_the_newest_pairing_code_is_valid(dash):
+    d, client, _ = dash
+    old = d.new_key()
+    d.new_key()
+    assert client.post("/login", json={"pin": old}).status_code == 401
+
+
+def test_revoking_devices_invalidates_their_tokens(dash):
+    d, client, _ = dash
+    d._tokens.add("phone-token")
+    r = client.post("/api/revoke-devices", headers={"Authorization": "Bearer good-token"})
+    assert r.status_code == 200
+    r = client.post("/api/wake", headers={"Authorization": "Bearer phone-token"})
+    assert r.status_code == 401
+
+
+def test_generated_certificate_meets_apple_tls_rules(tmp_path, monkeypatch):
+    import datetime
+    from cryptography import x509
+    from cryptography.x509.oid import ExtendedKeyUsageOID
+    monkeypatch.setattr(server, "BASE_DIR", tmp_path)
+    assert server._ensure_certs()
+    cert = x509.load_pem_x509_certificate((tmp_path / "config" / "certs" / "jarvis.crt").read_bytes())
+    eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+    assert ExtendedKeyUsageOID.SERVER_AUTH in eku
+    assert cert.not_valid_after_utc - cert.not_valid_before_utc <= datetime.timedelta(days=826)
+
+
+def test_upload_support_follows_the_multipart_package():
+    import importlib.util
+    has_parser = bool(importlib.util.find_spec("python_multipart") or importlib.util.find_spec("multipart"))
+    assert server._UPLOAD_OK == has_parser
