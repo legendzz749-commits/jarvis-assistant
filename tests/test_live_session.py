@@ -131,3 +131,34 @@ def test_phone_mic_is_not_streamed_while_asleep():
         task.cancel()
         return out.qsize()
     assert asyncio.run(run()) == 0
+
+
+def test_prompt_editor_notes_are_not_sent_to_the_model():
+    prompt = main._load_system_prompt()
+    assert "Edit the wording" not in prompt and "[SELF]" in prompt
+
+
+def test_idle_state_matches_the_real_mic_gate():
+    live = _live(_wake_enabled=False, _awake=True, _ptt_enabled=True, _ptt_held=False)
+    assert live._idle_state() == "SLEEPING"
+    live._ptt_enabled = False
+    assert live._idle_state() == "LISTENING"
+    live._wake_enabled, live._awake = True, False
+    assert live._idle_state() == "SLEEPING"
+
+
+def test_full_uplink_drops_the_oldest_block_instead_of_raising():
+    async def run():
+        live = _live(out_queue=asyncio.Queue(maxsize=2))
+        for i in range(5):
+            live._enqueue_mic({"n": i})
+        return [live.out_queue.get_nowait()["n"] for _ in range(2)]
+    assert asyncio.run(run()) == [3, 4]
+
+
+def test_network_errors_are_recognised_on_every_os():
+    import socket
+    group = BaseExceptionGroup("tg", [ConnectionResetError(104, "Connection reset by peer")])
+    assert main._is_network_error(group)
+    assert main._is_network_error(socket.gaierror(-2, "Name or service not known"))
+    assert not main._is_network_error(ValueError("bad config"))

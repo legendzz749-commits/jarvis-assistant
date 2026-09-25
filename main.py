@@ -289,7 +289,10 @@ def _get_api_key() -> str:
 
 def _load_system_prompt() -> str:
     try:
-        return PROMPT_PATH.read_text(encoding="utf-8")
+        text = PROMPT_PATH.read_text(encoding="utf-8")
+        # Lines starting with "#" are editor notes (see the top of prompt.txt);
+        # they were being sent to the model as part of its instructions.
+        return "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
     except Exception:
         return (
             "You are JARVIS, Tony Stark's AI assistant. "
@@ -523,6 +526,16 @@ def _leaf_errors_text(exc: BaseException) -> str:
     if isinstance(exc, BaseExceptionGroup):
         return " | ".join(_leaf_errors_text(sub) for sub in exc.exceptions)
     return f"{type(exc).__name__}: {exc}"
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """By type: ConnectionResetError, socket.gaierror, a closed websocket…
+    (message substrings only matched how Windows phrases them)."""
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_is_network_error(sub) for sub in exc.exceptions)
+    return (isinstance(exc, (OSError, TimeoutError))
+            or type(exc).__name__ in ("ConnectionClosed", "ConnectionClosedError",
+                                      "InvalidHandshake", "InvalidStatus"))
 
 
 def _keep_context_of(exc: BaseException) -> bool:
@@ -864,6 +877,7 @@ class JarvisLive:
             self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
             return
         self._last_out_logged = ""        # a new exchange: an identical answer is not a repeat
+        self._last_user_speech = time.monotonic()   # typing is activity too (auto-sleep)
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -895,7 +909,17 @@ class JarvisLive:
         if value:
             self.ui.set_state("SPEAKING")
         elif not self.ui.muted:
-            self.ui.set_state("LISTENING")
+            self.ui.set_state(self._idle_state())
+
+    def _idle_state(self) -> str:
+        """What the HUD should say when nothing is being said: SLEEPING whenever
+        the microphone is actually gated (wake-word asleep, or push-to-talk on
+        and not held), LISTENING only when it really is."""
+        if self._wake_enabled and not self._awake:
+            return "SLEEPING"
+        if self._ptt_enabled and not self._ptt_held:
+            return "SLEEPING"
+        return "LISTENING"
 
     def set_push_to_talk(self, enabled: bool) -> str:
         """Turn hold-to-talk on or off. Returns the scope actually achieved."""
@@ -934,7 +958,8 @@ class JarvisLive:
                 self._awake = True
                 self._last_user_speech = time.monotonic()
         try:
-            self.ui.set_state("LISTENING" if held else "SLEEPING")
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING" if held else self._idle_state())
         except Exception:
             pass
 
@@ -1394,7 +1419,7 @@ class JarvisLive:
             if not self.ui.muted and not self._phone_active:
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
-                    self.out_queue.put_nowait,
+                    self._enqueue_mic,
                     {"data": data, "mime_type": "audio/pcm"}
                 )
                 # Feed the live mic level to the HUD so the waveform reacts to
@@ -1449,6 +1474,20 @@ class JarvisLive:
             # seconds, forever, so typing and the phone could not be used either.
             self.ui.write_log("SYS: No usable microphone — typing and the phone still work.")
             await asyncio.Event().wait()     # stays until the session is torn down
+
+    def _enqueue_mic(self, item: dict) -> None:
+        """Runs on the loop. When the uplink stalls, drop the OLDEST block: the
+        newest audio is what matters, and put_nowait on a full queue raised
+        QueueFull for every block (traceback spam, seconds of stale audio)."""
+        q = self.out_queue
+        if q is None:
+            return
+        if q.full():
+            try:
+                q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        q.put_nowait(item)
 
     async def _flush_pending_vision(self) -> bool:
         """Send a captured frame immediately after its tool response.
@@ -2096,6 +2135,7 @@ class JarvisLive:
                     if self._wake_enabled and not self._awake:
                         self.wake(reason="remote command")
                     self._last_out_logged = ""
+                    self._last_user_speech = time.monotonic()
                     await self.session.send_client_content(
                         turns={"role": "user", "parts": [{"text": text}]},
                         turn_complete=True,
@@ -2317,7 +2357,7 @@ class JarvisLive:
                     continue
 
                 # Network / timeout errors — log clearly and back off
-                is_net_err = any(k in err_str for k in (
+                is_net_err = _is_network_error(e) or any(k in err_str for k in (
                     "TimeoutError", "timed out", "getaddrinfo", "CancelledError",
                     "ConnectionRefusedError", "OSError", "Cannot connect",
                 ))
