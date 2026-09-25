@@ -112,6 +112,9 @@ def _find_steam_linux() -> Path | None:
         Path.home() / ".steam" / "steam",
         Path.home() / ".steam" / "root",
         Path.home() / ".local"  / "share" / "Steam",
+        # Flatpak and Snap keep their data inside the sandbox
+        Path.home() / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam",
+        Path.home() / "snap" / "steam" / "common" / ".local" / "share" / "Steam",
         Path("/usr/share/steam"),
         Path("/opt/steam"),
     ]:
@@ -679,6 +682,17 @@ def _find_epic_exe() -> Path | None:
 def _find_epic_exe_windows() -> Path | None:
     try:
         import winreg
+        # The com.epicgames.launcher:// protocol handler names the real exe.
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT,
+                                r"com.epicgames.launcher\shell\open\command") as key:
+                cmd, _ = winreg.QueryValueEx(key, "")
+            m = re.match(r'\s*"([^"]+\.exe)"|\s*(\S+\.exe)', cmd, re.IGNORECASE)
+            exe = Path(m.group(1) or m.group(2)) if m else None
+            if exe and exe.exists():
+                return exe
+        except OSError:
+            pass
         for hive, key_path in [
             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\EpicGames\EpicGamesLauncher"),
             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\EpicGames\EpicGamesLauncher"),
@@ -1006,7 +1020,6 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                         if shutdown:
                             msg += " " + _arm_auto_shutdown(steam_path, speak)
                         if player: player.write_log(f"[GameUpdater] {msg[:100]}")
-                        if speak:  speak(msg)
                         return msg
                     elif not is_installed:
                         results.append(f"Steam: '{game_name}' is not installed.")
@@ -1014,6 +1027,11 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                         results.append(
                             f"Steam: {_update_steam_games(steam_path, game_name=game_name)}"
                         )
+                elif action == "install" and app_id:
+                    msg = _install_steam_game(steam_path, game_name=game_name, app_id=app_id)
+                    if shutdown:
+                        msg += " " + _arm_auto_shutdown(steam_path, speak)
+                    return msg
                 else:
                     if action == "install":
                         results.append("Steam: Please specify a game name to install.")
@@ -1039,7 +1057,6 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
 
         output = " | ".join(results) or "Nothing to do."
         if player: player.write_log(f"[GameUpdater] {output[:100]}")
-        if speak:  speak(output)
         return output
 
     return f"Unknown action: '{action}'."

@@ -75,3 +75,19 @@ def test_paste_restores_the_users_clipboard(monkeypatch):
     send_message._paste_text("hello")
 
     assert board["v"] == "user's copied text"
+
+
+def test_video_titles_with_quotes_and_ampersands_decode(monkeypatch):
+    html = ('"title":{"runs":[{"text":"Tom \\"The Rock\\" \\u0026 Friends"}]},'
+            '"ownerChannelName":"Rock \\u0026 Roll TV","viewCount":"1234","lengthSeconds":"125"')
+    monkeypatch.setattr(yt, "_REQUESTS_OK", True)
+    monkeypatch.setattr(yt.requests, "get", lambda *a, **k: SimpleNamespace(text=html))
+    info = yt._scrape_video_info("abc")
+    assert info["title"] == 'Tom "The Rock" & Friends'
+    assert info["channel"] == "Rock & Roll TV"
+
+
+def test_trending_defaults_to_the_users_region(monkeypatch):
+    import locale
+    monkeypatch.setattr(locale, "getlocale", lambda *a: ("de_DE", "UTF-8"))
+    assert yt._default_region() == "DE"

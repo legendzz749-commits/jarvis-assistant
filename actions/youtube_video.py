@@ -1,5 +1,6 @@
 #youtube_video.py
 import json
+import os
 import platform
 import re
 import sys
@@ -70,7 +71,7 @@ def _open_url(url: str) -> None:
         elif is_linux():
             subprocess.Popen(["xdg-open", url])
         else:
-            subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
+            os.startfile(url)   # cmd's `start` split the URL at '&' (dropping the videos filter)
     except Exception as e:
         print(f"[YouTube] ⚠️ open_url failed: {e}")
 
@@ -242,8 +243,8 @@ def _scrape_video_info(video_id: str) -> dict:
         info = {}
 
         for key, pattern in [
-            ("title",    r'"title":\{"runs":\[\{"text":"([^"]+)"'),
-            ("channel",  r'"ownerChannelName":"([^"]+)"'),
+            ("title",    r'"title":\{"runs":\[\{"text":"((?:[^"\\]|\\.)+)"'),
+            ("channel",  r'"ownerChannelName":"((?:[^"\\]|\\.)+)"'),
             ("views",    r'"viewCount":"(\d+)"'),
             ("duration", r'"lengthSeconds":"(\d+)"'),
             ("likes",    r'"label":"([0-9,]+ likes)"'),
@@ -256,6 +257,8 @@ def _scrape_video_info(video_id: str) -> dict:
                 elif key == "duration":
                     secs = int(raw)
                     info[key] = f"{secs // 60}:{secs % 60:02d}"
+                elif key in ("title", "channel"):
+                    info[key] = json.loads(f'"{raw}"')    # decode \" and \u0026
                 else:
                     info[key] = raw
 
@@ -265,7 +268,15 @@ def _scrape_video_info(video_id: str) -> dict:
         return {}
 
 
-def _scrape_trending(region: str = "TR", max_results: int = 8) -> list[dict]:
+def _default_region() -> str:
+    """The user's own country from the OS locale ('en_GB' -> GB), else US."""
+    import locale
+    loc = (locale.getlocale()[0] or os.environ.get("LANG", "") or "").split(".")[0]
+    code = loc.replace("-", "_").split("_")[-1] if "_" in loc.replace("-", "_") else ""
+    return code.upper() if len(code) == 2 and code.isalpha() else "US"
+
+
+def _scrape_trending(region: str = "US", max_results: int = 8) -> list[dict]:
     if not _REQUESTS_OK:
         return []
     url = f"https://www.youtube.com/feed/trending?gl={region.upper()}"
@@ -385,7 +396,7 @@ def _handle_get_info(parameters: dict, player, speak) -> str:
 
 
 def _handle_trending(parameters: dict, player, speak) -> str:
-    region = parameters.get("region", "TR").upper()
+    region = (parameters.get("region") or _default_region()).upper()
 
     if player:
         player.write_log(f"[YouTube] Trending: {region}")

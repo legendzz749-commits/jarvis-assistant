@@ -82,3 +82,27 @@ def test_auto_shutdown_waits_for_a_human(monkeypatch):
 ])
 def test_only_steams_own_windows_are_automated(title, ok):
     assert gu._is_steam_window(title) is ok
+
+
+def test_install_by_app_id_alone_is_accepted(monkeypatch, tmp_path):
+    installed = []
+    monkeypatch.setattr(gu, "_find_steam_path", lambda: tmp_path)
+    monkeypatch.setattr(gu, "_install_steam_game", lambda p, **k: installed.append(k) or "Installing.")
+    out = gu.game_updater({"action": "install", "platform": "steam", "app_id": "1245620"})
+    assert installed and installed[0]["app_id"] == "1245620" and "Installing" in out
+
+
+def test_flatpak_steam_is_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(gu.Path, "home", classmethod(lambda cls: tmp_path))
+    flat = tmp_path / ".var/app/com.valvesoftware.Steam/.local/share/Steam"
+    flat.mkdir(parents=True)
+    assert gu._find_steam_linux() == flat
+
+
+def test_result_is_not_also_spoken_as_a_user_turn(monkeypatch, tmp_path):
+    spoken = []
+    monkeypatch.setattr(gu, "_find_steam_path", lambda: tmp_path)
+    monkeypatch.setattr(gu, "_update_steam_games", lambda p, **k: "All up to date.")
+    monkeypatch.setattr(gu, "is_linux", lambda: True)
+    gu.game_updater({"action": "update", "platform": "both"}, speak=spoken.append)
+    assert spoken == []
