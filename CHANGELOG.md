@@ -1,5 +1,104 @@
 # Changelog
 
+## 2026-09-25 — Audit fixes, part 2
+
+Every remaining medium- and low-severity finding from the audit, fixed the same
+way as part 1: reproduced against the real code first, with a regression test
+that fails on the old code and passes on the new (239 tests in total).
+
+### 🔒 Privacy and safety
+
+- The phone mic is no longer streamed while JARVIS is asleep.
+- `config/api_keys.json` and the memory file are written owner-only (0600).
+- Generated passwords are no longer printed to the log.
+- Phone uploads no longer broadcast your local folder path (it names your OS
+  user). Linux screenshots go to `~/Pictures` instead of the repository, and
+  `.gitignore` also covers `uploads/`, stray screenshots and `.env`.
+- Typing and pasting give your clipboard back afterwards.
+
+### 🗣️ Conversation
+
+- Tool calls run off the receive loop, so a slow tool no longer freezes the
+  conversation.
+- "Goodbye" is spoken in full before JARVIS exits. The session summary is saved
+  afterwards, with a time limit.
+- A tail of an answer re-sent after a tool call is no longer logged or mouthed
+  twice. Repeated phrases inside an answer are no longer dropped.
+- A voice change made while connecting is applied. Plugin toggles take effect
+  in the running session.
+- Quiz results survive sleep and reconnects. A missing microphone no longer
+  ends the session.
+
+### 🧠 Memory
+
+- Reads and writes are atomic and locked, so concurrent saves no longer lose
+  facts.
+- Recall ignores accents ("Ayşe" finds `ayse_sister`). Only the latest session
+  recap is replayed.
+- Facts saved under any category reach the prompt. The prompt block stays
+  within its budget however much you store.
+
+### 🖥️ HUD
+
+- A live recolour reaches every painted part: the CPU bar, the drop zone and
+  an open document review. It also never overwrites the fixed status colours.
+- Fixes to panels and the activity log:
+  - Customise and Plugin Manager no longer leak widgets.
+  - The plugin list scrolls, so CLOSE stays on screen.
+  - The activity log no longer steals your scroll or selection, and colours
+    lines correctly.
+- Fixes to the file drop zone:
+  - Clearing a file resets its hint.
+  - Browse lists files that have no extension.
+- The avatar's brows move with a slow asymmetry. Lip-sync is thread-safe, and
+  ligatures and fullwidth text now reach the mouth.
+
+### 🧰 Tools
+
+- **Computer control:**
+  - Actions that did nothing no longer report "Done".
+  - Restart and shutdown wait the promised 10 seconds on every OS.
+  - Snap left and right use the real screen size.
+- **Desktop:**
+  - Wallpaper failures are reported.
+  - It uses the current KDE Plasma 6 and XFCE multi-monitor commands.
+  - Generated desktop code can use everyday Python built-ins.
+- **Files:**
+  - Word and PowerPoint tables are read.
+  - "Created" dates are no longer invented on Linux.
+- **Open app:** localized app names are pasted, not typed with their letters
+  dropped.
+- **System monitor:**
+  - An NVML failure reads as "unavailable", not 0 % GPU.
+  - Windows CPU temperature no longer fails on worker threads (COM is
+    initialised first).
+- **Code helper:**
+  - `~` paths are expanded.
+  - "Build" can start from an existing file, working on a `.fixed` copy.
+- **Phone dashboard:**
+  - Malformed requests no longer crash handlers.
+  - One bad message no longer ends the session.
+  - Each upload shows one card, with no replayed toasts.
+
+### 📦 Setup
+
+- `setup.py` reaches its version message on Python 3.8, and stops with a
+  sentence when `pip install .` tries to build it.
+- It checks pywin32 correctly on a first install.
+- `nvidia-ml-py` replaces the deprecated `pynvml` package.
+- The README names the right packages for `win32com`, `cv2` and `PIL`.
+
+### Known issues still open
+
+- Four areas were not reviewed:
+  - the `ui.py` settings overlays
+  - the plugin and config loaders
+  - browser control
+  - the cross-module check
+- `core/llm_client.py`, `core/stt.py`, `core/tts.py` and `core/installer.py`
+  are unused leftovers from an older version. They were left in place, not
+  deleted.
+
 ## 2026-09-25 — Audit fixes
 
 A line-by-line audit of the assistant. Every fix below was reproduced first
@@ -90,15 +189,3 @@ QT_QPA_PLATFORM=offscreen python -m pytest tests
   - Every CSV/TSV action failed.
   - YouTube summaries always failed with the current youtube-transcript-api.
 - **Messaging:** "Signal" messages were sent through Instagram.
-
-### Known issues still open
-
-- Send message can type into whichever window has focus if WhatsApp/Telegram
-  did not actually open.
-- About 220 medium- and low-severity audit findings are not yet verified or
-  fixed.
-- Four areas were not reviewed:
-  - the `ui.py` settings overlays
-  - the plugin and config loaders
-  - browser control
-  - the cross-module check
