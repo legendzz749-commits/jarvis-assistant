@@ -2,6 +2,8 @@ import subprocess
 import sys
 import json
 import re
+import shlex
+import tempfile
 import time
 from pathlib import Path
 
@@ -103,15 +105,18 @@ def _preview(code: str, lines: int = 10) -> str:
 
 
 def _has_error(output: str) -> bool:
-    error_signals = ["error", "exception", "traceback", "syntaxerror",
-                     "nameerror", "typeerror", "stderr", "failed", "crash"]
-    return any(s in output.lower() for s in error_signals)
+    """Judged from the exit status _run_file reports, not from words in the
+    output: a program printing "0 errors" did not fail, and a silent crash did."""
+    return output.startswith(("Exit code", "No interpreter", "Interpreter not found",
+                              "Execution error"))
 
 
 def _take_screenshot() -> Path | None:
     try:
         import pyautogui
-        screenshot_path = Path.home() / "Desktop" / f"jarvis_debug_{int(time.time())}.png"
+        # A temp file, not the Desktop: it is deleted after analysis, and a
+        # failed analysis must not leave full-screen captures lying around.
+        screenshot_path = Path(tempfile.gettempdir()) / f"jarvis_debug_{int(time.time())}.png"
         screenshot = pyautogui.screenshot()
         screenshot.save(str(screenshot_path))
         print(f"[Code] 📸 Screenshot: {screenshot_path}")
@@ -195,7 +200,9 @@ Code:"""
     response = model.generate_content(prompt)
     code     = _clean_code(response.text)
     path     = _resolve_save_path(output_path, lang)
-    _save_file(path, code)
+    status   = _save_file(path, code)
+    if not status.startswith("Saved"):
+        raise RuntimeError(status)
     return code, path
 
 
@@ -219,7 +226,7 @@ Fixed code:"""
     return _clean_code(response.text)
 
 
-def _run_file(path: Path, args: list, timeout: int) -> str:
+def _run_file(path: Path, args, timeout: int) -> str:
     interpreters = {
         ".py":  [sys.executable],
         ".js":  ["node"],
@@ -232,6 +239,8 @@ def _run_file(path: Path, args: list, timeout: int) -> str:
     interp = interpreters.get(path.suffix.lower())
     if not interp:
         return f"No interpreter for {path.suffix}."
+    if isinstance(args, str):          # the tool declares args as a STRING
+        args = shlex.split(args)
 
     try:
         result = subprocess.run(
@@ -243,6 +252,8 @@ def _run_file(path: Path, args: list, timeout: int) -> str:
         output = result.stdout.strip()
         error  = result.stderr.strip()
         parts  = []
+        if result.returncode != 0:
+            parts.append(f"Exit code {result.returncode}")
         if output: parts.append(f"Output:\n{output}")
         if error:  parts.append(f"Stderr:\n{error}")
         return "\n\n".join(parts) if parts else "Executed with no output."
@@ -398,7 +409,10 @@ def _run_action(file_path, args, timeout, player) -> str:
 
 def _optimize_action(file_path, code, language, output_path, player) -> str:
 
-    if file_path and not code:
+    # A snippet passed alongside a file_path is not that file: writing its
+    # optimized version over the file would replace the whole file with it.
+    from_file = bool(file_path and not code)
+    if from_file:
         code, err = _read_file(file_path)
         if err:
             return err
@@ -438,7 +452,7 @@ Optimized code:"""
         return f"Could not optimize code: {e}"
 
     # Kaydet
-    if file_path:
+    if from_file:
         save_path = Path(file_path)
     else:
         save_path = _resolve_save_path(output_path, lang)
@@ -508,6 +522,7 @@ Be specific and actionable. If you see an error message, quote it exactly."""
 
         response = gemini.call(contents, tier=gemini.SMART, timeout_ms=45_000)
         if response is None:
+            screenshot_path.unlink(missing_ok=True)
             return "Sir, I couldn't reach Gemini to analyse that screenshot."
 
         analysis = (response.text or "").strip()

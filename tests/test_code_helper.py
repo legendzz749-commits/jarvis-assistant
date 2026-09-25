@@ -54,3 +54,35 @@ def test_screen_debug_never_overwrites_the_original(tmp_path, fake_gemini, monke
 
     assert src.read_text() == "total = 1\nprint(totl)\n"
     assert (tmp_path / "app.fixed.py").read_text() == "total = 1\nprint(total)"
+
+
+def test_success_is_judged_by_exit_code_not_words(tmp_path):
+    ok = tmp_path / "ok.py"
+    ok.write_text("print('0 errors, build complete')")
+    crash = tmp_path / "crash.py"
+    crash.write_text("import sys; sys.exit(3)")
+    assert not ch._has_error(ch._run_file(ok, [], 30))
+    assert ch._has_error(ch._run_file(crash, [], 30))
+
+
+def test_run_accepts_args_as_the_declared_string(tmp_path):
+    script = tmp_path / "echo.py"
+    script.write_text("import sys; print(sys.argv[1:])")
+    assert "['--name', 'Ada Lovelace']" in ch._run_file(script, '--name "Ada Lovelace"', 30)
+
+
+def test_optimizing_a_snippet_never_overwrites_the_named_file(tmp_path, fake_gemini):
+    target = tmp_path / "app.py"
+    target.write_text("def main():\n    pass\n# lots more code\n")
+    fake_gemini.append("x = 1")
+    ch._optimize_action(str(target), "x=1", "python", str(tmp_path / "out.py"), None)
+    assert target.read_text() == "def main():\n    pass\n# lots more code\n"
+
+
+def test_screenshot_is_not_left_on_the_desktop(tmp_path, monkeypatch):
+    monkeypatch.setattr(ch.Path, "home", classmethod(lambda cls: tmp_path))
+    import pyautogui
+    monkeypatch.setattr(pyautogui, "screenshot", lambda: SimpleNamespace(save=lambda p: open(p, "wb").close()))
+    shot = ch._take_screenshot()
+    assert shot is not None and tmp_path not in shot.parents
+    shot.unlink()
