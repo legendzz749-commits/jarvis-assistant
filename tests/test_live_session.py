@@ -85,3 +85,31 @@ def test_quiz_results_survive_sleep_and_reconnect():
     live._on_text_command("[QUIZ_DONE] topic=history | auto-marked 4/5 correct")
     assert live._awake is True
     assert live._pending_texts == ["[QUIZ_DONE] topic=history | auto-marked 4/5 correct"]
+
+
+def test_a_slow_tool_does_not_stop_the_receive_loop():
+    sent = []
+
+    class FakeSession:
+        async def send_tool_response(self, function_responses):
+            sent.append(function_responses)
+
+    session = FakeSession()
+    live = _live(session=session, _tool_tasks=set(), _pending_vision=None)
+    live._flush_pending_vision = lambda: asyncio.sleep(0)
+
+    async def slow_tool(fc):
+        await asyncio.sleep(0.3)
+        return fc.name
+
+    live._execute_tool = slow_tool
+    tool_call = SimpleNamespace(function_calls=[SimpleNamespace(name="dev_agent")])
+
+    async def run():
+        start = asyncio.get_running_loop().time()
+        task = asyncio.create_task(live._answer_tool_call(tool_call, session))
+        await asyncio.sleep(0)                      # the loop is free right away
+        assert asyncio.get_running_loop().time() - start < 0.1 and not sent
+        await task
+    asyncio.run(run())
+    assert sent == [["dev_agent"]]

@@ -562,6 +562,7 @@ class JarvisLive:
         self._last_out_logged      = ""      # de-dupes a re-sent transcript tail
         self._connected_once       = False   # only the first connect starts asleep (wake word)
         self._pending_texts: list[str] = []  # user results that arrived with no session
+        self._tool_tasks: set = set()         # tool calls still running
         # Push-to-talk
         self._ptt_enabled          = False
         self._ptt_held             = False
@@ -1609,19 +1610,35 @@ class JarvisLive:
                                 asyncio.create_task(_cam_close())
 
                     if response.tool_call:
-                        fn_responses = []
-                        for fc in response.tool_call.function_calls:
-                            print(f"[JARVIS] 📞 {fc.name}")
-                            fr = await self._execute_tool(fc)
-                            fn_responses.append(fr)
-                        await self.session.send_tool_response(
-                            function_responses=fn_responses
-                        )
-                        await self._flush_pending_vision()
+                        # Off the receive loop: awaiting the tool here stopped
+                        # every server message — audio, transcripts, even the
+                        # NON_BLOCKING tools' own follow-up — until it returned.
+                        task = asyncio.create_task(
+                            self._answer_tool_call(response.tool_call, self.session))
+                        self._tool_tasks.add(task)
+                        task.add_done_callback(self._tool_tasks.discard)
         except Exception as e:
             print(f"[JARVIS] ❌ Recv: {e}")
             traceback.print_exc()
             raise
+
+    async def _answer_tool_call(self, tool_call, session) -> None:
+        """Run one tool_call's functions and answer on the session that asked
+        (never a newer one after a reconnect)."""
+        try:
+            fn_responses = []
+            for fc in tool_call.function_calls:
+                print(f"[JARVIS] 📞 {fc.name}")
+                fn_responses.append(await self._execute_tool(fc))
+            if session is not self.session:
+                return
+            await session.send_tool_response(function_responses=fn_responses)
+            await self._flush_pending_vision()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[JARVIS] ❌ Tool call: {e}")
+            traceback.print_exc()
 
     async def _play_audio(self):
         print("[JARVIS] 🔊 Play started")
@@ -2150,6 +2167,8 @@ class JarvisLive:
                     client.aio.live.connect(model=LIVE_MODEL, config=config) as session,
                     asyncio.TaskGroup() as tg,
                 ):
+                    for task in list(self._tool_tasks):   # answers for a closed session
+                        task.cancel()
                     self.session          = session
                     self.audio_in_queue   = asyncio.Queue()
                     self.out_queue        = asyncio.Queue(maxsize=200)
