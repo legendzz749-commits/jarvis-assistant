@@ -28,3 +28,18 @@ def test_linux_unknown_app_is_not_reported_as_opened(monkeypatch):
     monkeypatch.setattr(open_app.subprocess, "run",
                         lambda argv, **k: SimpleNamespace(returncode=4))   # xdg-open / gtk-launch fail
     assert open_app._launch_linux("nosuchapp") is False
+
+
+def test_localized_names_reach_spotlight_intact(monkeypatch):
+    import sys
+    from actions import computer_control as cc
+    typed, pasted = [], []
+    fake = SimpleNamespace(PAUSE=0, press=lambda *a: None, hotkey=lambda *a: None,
+                           write=lambda text, **k: typed.append(text))
+    monkeypatch.setitem(sys.modules, "pyautogui", fake)
+    monkeypatch.setattr(cc, "_paste_via_clipboard", lambda t: pasted.append(t) or True)
+    monkeypatch.setattr(open_app.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1))
+    monkeypatch.setattr(open_app.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr(open_app.time, "sleep", lambda _s: None)
+    open_app._launch_macos("Hesap Makinesi Öğrenci")
+    assert pasted == ["Hesap Makinesi Öğrenci"] and typed == []

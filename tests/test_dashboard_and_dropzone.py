@@ -144,3 +144,16 @@ def test_one_bad_websocket_frame_does_not_end_the_session(dash):
         while d._command_queue.empty() and time.monotonic() < deadline:
             time.sleep(0.02)
     assert d._command_queue.get_nowait() == "lights on"
+
+
+def test_upload_echo_names_its_sender_not_the_local_folder(dash):
+    d, client, folder = dash
+    client.post("/api/upload", files={"file": ("notes.txt", b"hello")},
+                headers={"Authorization": "Bearer good-token", "X-Upload-Id": "tab-1"})
+    deadline = time.monotonic() + 5
+    while not d._history and time.monotonic() < deadline:
+        time.sleep(0.02)
+    (msg,) = [m for m in d._history if m["type"] == "file_received"]
+    assert msg["upload_id"] == "tab-1" and str(folder) not in str(msg)
+    with client.websocket_connect("/ws?token=good-token") as ws:
+        assert ws.receive_json()["replay"] is True     # the page shows no toast for it

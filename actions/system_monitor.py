@@ -48,7 +48,8 @@ def _nvml_gpu() -> float:
             for name in candidates:
                 try:
                     lib = _load(name)
-                    lib.nvmlInit_v2()
+                    if lib.nvmlInit_v2() != 0:      # 0 == NVML_SUCCESS
+                        continue
                     _nvml_lib = lib
                     break
                 except Exception:
@@ -59,9 +60,12 @@ def _nvml_gpu() -> float:
             return -1.0
 
         dev = ctypes.c_void_p()
-        _nvml_lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev))
         u = _Util()
-        _nvml_lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(u))
+        # A failed call leaves the struct zeroed, which read as a real 0 % GPU.
+        if (_nvml_lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev)) != 0
+                or _nvml_lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(u)) != 0):
+            _nvml_ok = False
+            return -1.0
         _nvml_ok = True
         return float(u.gpu)
     except Exception:
@@ -99,11 +103,18 @@ def _get_cpu_temp() -> float:
     # Windows: wmi module (pure Python COM, zero subprocess)
     if _OS == "Windows":
         try:
+            import pythoncom  # type: ignore
             import wmi  # type: ignore
-            w = wmi.WMI(namespace="root/wmi")
-            tz = w.MSAcpi_ThermalZoneTemperature()
-            if tz:
-                return (tz[0].CurrentTemperature / 10.0) - 273.15
+            # Runs on executor threads, where COM has not been initialised —
+            # without this every WMI call failed and the alert never fired.
+            pythoncom.CoInitialize()
+            try:
+                w = wmi.WMI(namespace="root/wmi")
+                tz = w.MSAcpi_ThermalZoneTemperature()
+                if tz:
+                    return (tz[0].CurrentTemperature / 10.0) - 273.15
+            finally:
+                pythoncom.CoUninitialize()
         except Exception:
             pass
 

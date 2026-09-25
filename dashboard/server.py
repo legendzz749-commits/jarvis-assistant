@@ -849,7 +849,9 @@ class DashboardServer:
                     "type": "file_received",
                     "name": dest.name,
                     "size": size,
-                    "saved_to": str(self._uploads_dir),
+                    # lets the uploading tab skip its own echo; the local
+                    # folder path (it names the OS user) is not sent to phones
+                    "upload_id": req.headers.get("x-upload-id", "")[:64],
                 }))
                 return JSONResponse({"ok": True, "name": dest.name, "size": size})
         else:
@@ -902,7 +904,7 @@ class DashboardServer:
             self._clients.add(websocket)
             for entry in self._history[-50:]:
                 try:
-                    await websocket.send_json(entry)
+                    await websocket.send_json({**entry, "replay": True})   # no toasts for old news
                 except Exception:
                     break
             try:

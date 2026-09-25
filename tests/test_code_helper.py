@@ -93,3 +93,13 @@ def test_home_relative_paths_are_expanded(tmp_path, monkeypatch):
     (tmp_path / "script.py").write_text("print(1)")
     assert ch._resolve_save_path("~/out.py", "python") == tmp_path / "out.py"
     assert ch._read_file("~/script.py")[0] == "print(1)"
+
+
+def test_build_starts_from_the_given_file_and_keeps_it(tmp_path, fake_gemini):
+    src = tmp_path / "tool.py"
+    src.write_text("print(undefined_name)\n")
+    fake_gemini.append("print('fixed')")
+    out = ch.code_helper({"action": "build", "file_path": str(src)})
+    assert src.read_text() == "print(undefined_name)\n"
+    assert (tmp_path / "tool.fixed.py").read_text() == "print('fixed')"
+    assert "Build complete" in out

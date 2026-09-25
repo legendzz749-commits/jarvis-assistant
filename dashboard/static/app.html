@@ -313,6 +313,9 @@
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/upload');
       xhr.setRequestHeader('Authorization', `Bearer ${_authToken}`);
+      const uploadId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+      _myUploads.add(uploadId);
+      xhr.setRequestHeader('X-Upload-Id', uploadId);
 
       xhr.upload.onprogress = (e) => {
         if (!e.lengthComputable) return;
@@ -360,7 +363,12 @@
     }
 
     // File received by another WebSocket client (e.g., second open tab)
+    // This tab already shows a card for its own uploads; the server's echo of
+    // them would add a second one.
+    const _myUploads = new Set();
+
     function _onFileReceived(m) {
+      if (m.upload_id && _myUploads.has(m.upload_id)) return;
       const dlUrl = `/uploads/${encodeURIComponent(m.name)}?token=${encodeURIComponent(_authToken)}`;
       const card  = document.createElement('div');
       card.className = 'msg-file';
@@ -376,7 +384,7 @@
       `;
       feed.appendChild(card);
       feed.scrollTop = feed.scrollHeight;
-      toast('File received on computer!');
+      if (!m.replay) toast('File received on computer!');
     }
 
     // File input change handler

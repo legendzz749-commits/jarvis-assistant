@@ -2,18 +2,18 @@
 file_processor.py — JARVIS Universal File Processor
 
 Supported types:
-  image   → describe, ocr, resize, convert, compress, crop
-  pdf     → summarize, extract_text, extract_pages, to_word
-  docx    → summarize, extract_text, reformat, translate_hint
-  txt/md  → summarize, reformat, translate_hint, word_count
-  csv     → analyze, filter, sort, convert, stats
-  xlsx    → analyze, filter, convert, stats
-  json    → validate, format, extract, convert
-  code    → explain, review, fix, run, document
+  image   → describe, ocr, resize, convert, compress, info
+  pdf     → summarize, extract_text, to_word, info
+  docx    → summarize, extract_text, reformat, translate_hint, word_count
+  txt/md  → summarize, extract_text, reformat, translate_hint, word_count
+  csv     → analyze, filter, sort, convert, stats, info
+  xlsx    → analyze, filter, sort, convert, stats, info
+  json    → validate, format, analyze, extract, to_csv
+  code    → explain, review, fix, optimize, document, run, info
   audio   → transcribe, trim, convert, info
-  video   → trim, extract_audio, extract_frame, info, compress
+  video   → trim, extract_audio, extract_frame, compress, transcribe, convert, info
   zip     → list, extract
-  pptx    → summarize, extract_text, to_pdf
+  pptx    → summarize, extract_text, analyze
 """
 
 import os
@@ -266,6 +266,41 @@ def _process_pdf(path: Path, action: str, params: dict, speak=None) -> str:
 
     return f"Unknown PDF action: '{action}'. Try: summarize, extract_text, info, to_word"
 
+def _docx_table_rows(tables) -> list[str]:
+    """One " | "-joined line per table row, nested tables included. A merged
+    cell is reported once, not once per grid column it spans."""
+    rows = []
+    for table in tables:
+        for row in table.rows:
+            seen, cells = set(), []
+            for cell in row.cells:
+                if id(cell._tc) in seen:
+                    continue
+                seen.add(id(cell._tc))
+                if cell.text.strip():
+                    cells.append(cell.text.strip())
+                rows.extend(_docx_table_rows(cell.tables))
+            if cells:
+                rows.append(" | ".join(cells))
+    return rows
+
+
+def _pptx_shape_text(shapes) -> list[str]:
+    """Text of every shape, including table cells and grouped shapes."""
+    lines = []
+    for shape in shapes:
+        if hasattr(shape, "shapes"):                       # a group
+            lines.extend(_pptx_shape_text(shape.shapes))
+        elif getattr(shape, "has_table", False):
+            for row in shape.table.rows:
+                cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                if cells:
+                    lines.append(" | ".join(cells))
+        elif getattr(shape, "has_text_frame", False) and shape.text_frame.text.strip():
+            lines.append(shape.text_frame.text.strip())
+    return lines
+
+
 def _process_text_doc(path: Path, file_type: str, action: str,
                        params: dict, speak=None) -> str:
     action = action or "summarize"
@@ -275,7 +310,8 @@ def _process_text_doc(path: Path, file_type: str, action: str,
             try:
                 from docx import Document
                 doc  = Document(path)
-                return "\n".join(p.text for p in doc.paragraphs)
+                # Tables hold the key figures of invoices and reports.
+                return "\n".join([p.text for p in doc.paragraphs] + _docx_table_rows(doc.tables))
             except ImportError:
                 raise ValueError("python-docx is not installed (pip install python-docx).") from None
             except Exception as e:
@@ -798,9 +834,8 @@ def _process_pptx(path: Path, action: str, params: dict, speak=None) -> str:
             text = []
             for i, slide in enumerate(prs.slides, 1):
                 slide_text = f"\n--- Slide {i} ---\n"
-                for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text.strip():
-                        slide_text += shape.text.strip() + "\n"
+                for line in _pptx_shape_text(slide.shapes):
+                    slide_text += line + "\n"
                 text.append(slide_text)
             return "\n".join(text)
         except ImportError:

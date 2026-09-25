@@ -246,3 +246,26 @@ def test_type_text_gives_back_the_users_clipboard(monkeypatch):
     monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
     cs.type_text("hello there")
     assert board == ["what the user copied", "hello there", "what the user copied"]
+
+
+def test_actions_that_did_nothing_do_not_say_done(monkeypatch):
+    monkeypatch.setattr(cs, "_OS", "Linux")
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(cs.subprocess, "run", lambda argv, **k: types.SimpleNamespace(returncode=1))
+    monkeypatch.setattr(cs.subprocess, "Popen", lambda argv, **k: None)
+    for action in ("open_run", "lock_screen", "open_task_manager"):
+        assert not cs.computer_settings({"action": action}).startswith("Done"), action
+
+
+def test_restart_waits_the_promised_ten_seconds_on_linux(monkeypatch):
+    monkeypatch.setattr(cs, "_OS", "Linux")
+    ran, timers = [], []
+    monkeypatch.setattr(cs.subprocess, "run", lambda argv, **k: ran.append(argv))
+    import threading
+    monkeypatch.setattr(threading, "Timer",
+                        lambda delay, fn: timers.append((delay, fn)) or types.SimpleNamespace(start=lambda: None))
+    cs.restart_computer()
+    assert ran == [] and timers[0][0] == 10
+    timers[0][1]()
+    assert ran == [["systemctl", "reboot"]]

@@ -81,6 +81,16 @@ def _normalize(raw: str) -> str:
 
     return raw  
 
+def _type_name(pyautogui, app_name: str) -> None:
+    """Type into Start / Spotlight. pyautogui can only type ASCII and silently
+    drops everything else, so localized names go through the clipboard."""
+    if not app_name.isascii():
+        from actions.computer_control import _paste_via_clipboard
+        if _paste_via_clipboard(app_name):
+            return
+    pyautogui.write(app_name, interval=0.05)
+
+
 def _launch_windows(app_name: str) -> bool:
 
     # No shell: app_name comes from the model, and "x.exe & other" was a command.
@@ -110,7 +120,7 @@ def _launch_windows(app_name: str) -> bool:
         pyautogui.PAUSE = 0.1
         pyautogui.press("win")
         time.sleep(0.7)
-        pyautogui.write(app_name, interval=0.05)
+        _type_name(pyautogui, app_name)
         time.sleep(0.9)
         pyautogui.press("enter")
         time.sleep(2.5)
@@ -162,7 +172,7 @@ def _launch_macos(app_name: str) -> bool:
         import pyautogui
         pyautogui.hotkey("command", "space")
         time.sleep(0.6)
-        pyautogui.write(app_name, interval=0.05)
+        _type_name(pyautogui, app_name)
         time.sleep(0.8)
         pyautogui.press("enter")
         time.sleep(1.5)

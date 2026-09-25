@@ -266,8 +266,9 @@ def _run_file(path: Path, args, timeout: int) -> str:
         return f"Execution error: {e}"
 
 
-def _build(description, language, output_path, args, timeout, speak=None, player=None) -> str:
-    if not description:
+def _build(description, language, output_path, args, timeout, speak=None, player=None,
+           file_path: str = "") -> str:
+    if not description and not file_path:
         return "Please describe what you want me to build, sir."
 
     if player:
@@ -276,7 +277,19 @@ def _build(description, language, output_path, args, timeout, speak=None, player
     lang = language or "python"
 
     try:
-        code, path = _write(description, lang, output_path, player)
+        if file_path:
+            # "Make my script work": iterate on a copy beside it (so relative
+            # imports still resolve) and never overwrite the original.
+            code, err = _read_file(file_path)
+            if err:
+                return err
+            src  = Path(file_path).expanduser()
+            path = (_resolve_save_path(output_path, lang) if output_path
+                    else src.with_name(f"{src.stem}.fixed{src.suffix}"))
+            _save_file(path, code)
+            description = description or f"{src.name} should run without errors."
+        else:
+            code, path = _write(description, lang, output_path, player)
         print(f"[Code] ✅ Written: {path}")
     except Exception as e:
         msg = f"Could not write initial code: {e}"
@@ -608,7 +621,7 @@ def code_helper(
         return _run_action(file_path, args, timeout, player)
 
     elif action == "build":
-        return _build(description, language, output_path, args, timeout, speak, player)
+        return _build(description, language, output_path, args, timeout, speak, player, file_path)
 
     elif action == "optimize":
         return _optimize_action(file_path, code, language, output_path, player)

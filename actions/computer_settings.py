@@ -3,8 +3,10 @@ import json
 import re
 import sys
 import time
+import shutil
 import subprocess
 import platform
+import threading
 from pathlib import Path
 
 try:
@@ -356,10 +358,14 @@ def open_task_manager():
     elif _OS == "Darwin":
         subprocess.Popen(["open", "-a", "Activity Monitor"])
     else:
-        for cmd in [["gnome-system-monitor"], ["xfce4-taskmanager"], ["htop"]]:
-            if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
+        # htop was the last resort, but it is a terminal program: started
+        # without a terminal it takes over JARVIS's console or exits.
+        for cmd in [["gnome-system-monitor"], ["plasma-systemmonitor"], ["ksysguard"],
+                    ["xfce4-taskmanager"], ["mate-system-monitor"]]:
+            if shutil.which(cmd[0]):
                 subprocess.Popen(cmd)
-                break
+                return None
+        return "No graphical system monitor is installed (e.g. gnome-system-monitor)."
 
 
 def focus_search():
@@ -520,9 +526,9 @@ def lock_screen():
             ["xdg-screensaver", "lock"],
             ["loginctl", "lock-session"],
         ]:
-            if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
-                subprocess.run(cmd, capture_output=True)
-                return
+            if shutil.which(cmd[0]) and subprocess.run(cmd, capture_output=True).returncode == 0:
+                return None
+        return "Could not lock the screen: no screen locker answered."
 
 def open_system_settings():
     if _OS == "Windows":
@@ -562,6 +568,8 @@ def sleep_display():
 def open_run():
     if _OS == "Windows":
         pyautogui.hotkey("win", "r")
+        return None
+    return "The Run dialog exists only on Windows."
 
 def dark_mode():
     if _OS == "Darwin":
@@ -664,25 +672,27 @@ def toggle_wifi():
         except Exception as e:
             print(f"[Settings] toggle_wifi Linux failed: {e}")
 
+def _in_ten_seconds(argv: list) -> None:
+    """The confirm banner promises ten seconds to save work; Windows' /t 10
+    keeps that promise, and this does the same on macOS and Linux."""
+    threading.Timer(10, lambda: subprocess.run(argv, capture_output=True)).start()
+
+
 def restart_computer():
     if _OS == "Windows":
         subprocess.run(["shutdown", "/r", "/t", "10"], capture_output=True, **_WIN_HIDE)
     elif _OS == "Darwin":
-        subprocess.run(["osascript", "-e",
-            'tell application "System Events" to restart'],
-            capture_output=True)
+        _in_ten_seconds(["osascript", "-e", 'tell application "System Events" to restart'])
     else:
-        subprocess.run(["systemctl", "reboot"], capture_output=True)
+        _in_ten_seconds(["systemctl", "reboot"])
 
 def shutdown_computer():
     if _OS == "Windows":
         subprocess.run(["shutdown", "/s", "/t", "10"], capture_output=True)
     elif _OS == "Darwin":
-        subprocess.run(["osascript", "-e",
-            'tell application "System Events" to shut down'],
-            capture_output=True)
+        _in_ten_seconds(["osascript", "-e", 'tell application "System Events" to shut down'])
     else:
-        subprocess.run(["systemctl", "poweroff"], capture_output=True)
+        _in_ten_seconds(["systemctl", "poweroff"])
 
 ACTION_MAP: dict[str, callable] = {
     "volume_up":           volume_up,
@@ -990,10 +1000,12 @@ def computer_settings(
         _before = ("theme", _theme_state())
 
     try:
-        func()
+        problem = func()           # a string means nothing happened, and why
     except Exception as e:
         print(f"[Settings] Action failed ({action}): {e}")
         return f"Action failed ({action}): {e}"
+    if isinstance(problem, str):
+        return problem
 
     if _before:
         kind, old = _before

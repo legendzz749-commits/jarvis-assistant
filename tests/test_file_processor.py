@@ -138,3 +138,33 @@ def test_extract_text_of_a_text_file_returns_it(tmp_path):
     path.write_text("hello there")
     assert fp._process_text_doc(path, "text", "extract_text", {}) == "hello there"
     assert not list(tmp_path.glob("*_extracted.txt"))
+
+
+def test_docx_tables_are_read(tmp_path):
+    docx = pytest.importorskip("docx")
+    doc = docx.Document()
+    doc.add_paragraph("Invoice 42")
+    t = doc.add_table(rows=2, cols=2)
+    t.cell(0, 0).text, t.cell(0, 1).text = "Item", "Total"
+    t.cell(1, 0).text, t.cell(1, 1).text = "Consulting", "€1,250"
+    path = tmp_path / "invoice.docx"
+    doc.save(path)
+    fp._process_text_doc(path, "docx", "extract_text", {})
+    out = (tmp_path / "invoice_extracted.txt").read_text(encoding="utf-8")
+    assert "Invoice 42" in out and "Consulting | €1,250" in out
+
+
+def test_pptx_tables_and_groups_are_read(tmp_path):
+    pptx = pytest.importorskip("pptx")
+    from pptx.util import Inches
+    prs = pptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    table = slide.shapes.add_table(2, 2, Inches(1), Inches(1), Inches(4), Inches(1)).table
+    table.cell(1, 0).text, table.cell(1, 1).text = "Q3 revenue", "4.2M"
+    group = slide.shapes.add_group_shape()
+    group.shapes.add_textbox(Inches(1), Inches(3), Inches(3), Inches(1)).text_frame.text = "Grouped note"
+    path = tmp_path / "deck.pptx"
+    prs.save(path)
+    fp._process_pptx(path, "extract_text", {})
+    out = (tmp_path / "deck_text.txt").read_text(encoding="utf-8")
+    assert "Q3 revenue | 4.2M" in out and "Grouped note" in out

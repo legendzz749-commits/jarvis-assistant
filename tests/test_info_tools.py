@@ -75,3 +75,34 @@ def test_youtube_summary_is_not_injected_as_a_user_turn(monkeypatch):
     monkeypatch.setattr(yt, "_summarize_with_gemini", lambda t, u: "the summary")
     out = yt._handle_summarize({"url": "https://youtu.be/dQw4w9WgXcQ"}, None, spoken.append)
     assert "the summary" in out and spoken == []
+
+
+def test_failed_nvml_calls_are_not_reported_as_zero_gpu(monkeypatch):
+    class Lib:
+        def nvmlInit_v2(self):
+            return 0
+        def nvmlDeviceGetHandleByIndex_v2(self, i, ref):
+            return 18                                   # NVML_ERROR_LIB_RM_VERSION_MISMATCH
+        def nvmlDeviceGetUtilizationRates(self, dev, ref):
+            return 0
+    monkeypatch.setattr(system_monitor, "_nvml_lib", Lib())
+    monkeypatch.setattr(system_monitor, "_nvml_ok", None)
+    assert system_monitor._nvml_gpu() == -1.0
+
+
+def test_windows_temperature_initialises_com_on_the_calling_thread(monkeypatch):
+    import sys
+    state = {"com": False}
+    pythoncom = SimpleNamespace(CoInitialize=lambda: state.update(com=True),
+                                CoUninitialize=lambda: state.update(com=False))
+    def WMI(namespace):
+        if not state["com"]:
+            raise OSError("CoInitialize has not been called")
+        return SimpleNamespace(MSAcpi_ThermalZoneTemperature=lambda: [
+            SimpleNamespace(CurrentTemperature=3232)])
+    monkeypatch.setitem(sys.modules, "pythoncom", pythoncom)
+    monkeypatch.setitem(sys.modules, "wmi", SimpleNamespace(WMI=WMI))
+    monkeypatch.setattr(system_monitor, "_OS", "Windows")
+    monkeypatch.setattr(system_monitor.psutil, "sensors_temperatures", lambda: {}, raising=False)
+    assert round(system_monitor._get_cpu_temp(), 2) == 50.05
+    assert state["com"] is False                        # released again
