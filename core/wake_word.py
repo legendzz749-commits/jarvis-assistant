@@ -52,16 +52,20 @@ def is_ready() -> bool:
     if not is_installed():
         return False
     try:
-        import openwakeword
-        models_dir = Path(openwakeword.__file__).resolve().parent / "resources" / "models"
+        # Located, not imported: importing openwakeword pulls in onnxruntime,
+        # scipy and scikit-learn (~1 s), and this runs on the Qt thread.
+        import importlib.util
+        spec = importlib.util.find_spec("openwakeword")
+        if spec is None or not spec.submodule_search_locations:
+            return False
+        models_dir = Path(list(spec.submodule_search_locations)[0]) / "resources" / "models"
         if not models_dir.is_dir():
             return False
-        has_wake = (any(models_dir.glob(f"{WAKE_MODEL}*.onnx"))
-                    or any(models_dir.glob(f"{WAKE_MODEL}*.tflite")))
-        has_mel = (any(models_dir.glob("melspectrogram*.onnx"))
-                   or any(models_dir.glob("melspectrogram*.tflite")))
-        has_emb = (any(models_dir.glob("embedding_model*.onnx"))
-                   or any(models_dir.glob("embedding_model*.tflite")))
+        # Only the ONNX files start() actually loads count: .tflite leftovers
+        # from an interrupted download made this "ready" while start() failed.
+        has_wake = any(models_dir.glob(f"{WAKE_MODEL}*.onnx"))
+        has_mel = any(models_dir.glob("melspectrogram*.onnx"))
+        has_emb = any(models_dir.glob("embedding_model*.onnx"))
         return bool(has_wake and has_mel and has_emb)
     except Exception:
         return False
@@ -79,10 +83,19 @@ def install_and_download(logger: Callable[[str], None] = print,
         if not is_installed():
             logger("Wake word: installing openwakeword (one-time)…")
             _tell("Wake word: installing openwakeword (one-time)…")
+            # openwakeword 0.6 requires tflite-runtime on Linux, which has no
+            # Python 3.12+ wheels, so pip silently backtracks to 0.4 — whose API
+            # this module cannot use. Install 0.6 without it; we run ONNX only.
             r = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "openwakeword"],
+                [sys.executable, "-m", "pip", "install", "--no-deps", "openwakeword>=0.6,<0.7"],
                 capture_output=True, text=True,
             )
+            if r.returncode == 0:
+                r = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "onnxruntime>=1.10,<2",
+                     "tqdm", "scipy", "scikit-learn", "requests"],
+                    capture_output=True, text=True,
+                )
             if r.returncode != 0:
                 tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [""]
                 return False, f"pip install failed: {tail[0][:160]}"
@@ -196,6 +209,12 @@ class WakeWordDetector:
                 if score >= self._threshold:
                     # drain any backlog so we don't double-fire on the same utterance
                     self._drain()
+                    # openwakeword is stateful: without a reset its buffers still
+                    # hold "hey jarvis" when feeding resumes after sleep, and the
+                    # first frame re-fires the wake.
+                    reset = getattr(self._model, "reset", None)
+                    if reset:
+                        reset()
                     try:
                         self._on_detect()
                     except Exception as e:

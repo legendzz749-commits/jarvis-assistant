@@ -100,6 +100,10 @@ def band_energies(pcm, sr: int) -> np.ndarray:
     another, and a projection needs real magnitudes.
     """
     x = np.asarray(pcm, dtype=np.float32)
+    if x.ndim > 1:
+        # sounddevice hands over (frames, channels); a 2-D block broadcast the
+        # window into a frames×frames matrix and the band mask raised IndexError.
+        x = x[:, 0]
     if x.size < 64:
         return np.zeros(len(_BAND_EDGES) - 1, dtype=np.float32)
     x = x - x.mean()

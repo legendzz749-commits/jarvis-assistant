@@ -1,5 +1,7 @@
 #youtube_video.py
 import json
+import os
+import platform
 import re
 import sys
 import time
@@ -69,7 +71,7 @@ def _open_url(url: str) -> None:
         elif is_linux():
             subprocess.Popen(["xdg-open", url])
         else:
-            subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
+            os.startfile(url)   # cmd's `start` split the URL at '&' (dropping the videos filter)
     except Exception as e:
         print(f"[YouTube] ⚠️ open_url failed: {e}")
 
@@ -117,16 +119,21 @@ def _is_valid_youtube_url(url: str) -> bool:
 
 
 def _ask_for_url(prompt_text: str = "YouTube video URL:") -> str | None:
+    # Tools run on arbitrary executor threads. A Tk root belongs to the thread
+    # that made it, so one is created and destroyed per call; on macOS Tk off
+    # the main thread aborts the process, so there the URL must be spoken.
+    if platform.system() == "Darwin":
+        return None
     try:
         import tkinter as tk
         from tkinter import simpledialog
 
-        root = tk._default_root
-        if root is None:
-            root = tk.Tk()
-            root.withdraw()
-
-        url = simpledialog.askstring("J.A.R.V.I.S", prompt_text, parent=root)
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            url = simpledialog.askstring("J.A.R.V.I.S", prompt_text, parent=root)
+        finally:
+            root.destroy()
         return url.strip() if url else None
     except Exception as e:
         print(f"[YouTube] ⚠️ URL dialog failed: {e}")
@@ -137,7 +144,10 @@ def _get_transcript(video_id: str) -> str | None:
     if not _TRANSCRIPT_OK:
         return None
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        if hasattr(YouTubeTranscriptApi, "list_transcripts"):      # < 1.2
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        else:                                                       # 1.2+: instance API
+            transcript_list = YouTubeTranscriptApi().list(video_id)
         transcript      = None
 
         lang_priority = ["en", "tr", "de", "fr", "es", "it", "pt", "ru", "ja", "ko", "ar", "zh"]
@@ -159,7 +169,8 @@ def _get_transcript(video_id: str) -> str | None:
             return None
 
         fetched = transcript.fetch()
-        return " ".join(entry["text"] for entry in fetched)
+        # 1.x returns snippet objects; 0.x returned dicts
+        return " ".join(getattr(e, "text", None) or e["text"] for e in fetched)
 
     except Exception as e:
         print(f"[YouTube] ⚠️ Transcript fetch failed: {e}")
@@ -232,8 +243,8 @@ def _scrape_video_info(video_id: str) -> dict:
         info = {}
 
         for key, pattern in [
-            ("title",    r'"title":\{"runs":\[\{"text":"([^"]+)"'),
-            ("channel",  r'"ownerChannelName":"([^"]+)"'),
+            ("title",    r'"title":\{"runs":\[\{"text":"((?:[^"\\]|\\.)+)"'),
+            ("channel",  r'"ownerChannelName":"((?:[^"\\]|\\.)+)"'),
             ("views",    r'"viewCount":"(\d+)"'),
             ("duration", r'"lengthSeconds":"(\d+)"'),
             ("likes",    r'"label":"([0-9,]+ likes)"'),
@@ -246,6 +257,8 @@ def _scrape_video_info(video_id: str) -> dict:
                 elif key == "duration":
                     secs = int(raw)
                     info[key] = f"{secs // 60}:{secs % 60:02d}"
+                elif key in ("title", "channel"):
+                    info[key] = json.loads(f'"{raw}"')    # decode \" and \u0026
                 else:
                     info[key] = raw
 
@@ -255,7 +268,15 @@ def _scrape_video_info(video_id: str) -> dict:
         return {}
 
 
-def _scrape_trending(region: str = "TR", max_results: int = 8) -> list[dict]:
+def _default_region() -> str:
+    """The user's own country from the OS locale ('en_GB' -> GB), else US."""
+    import locale
+    loc = (locale.getlocale()[0] or os.environ.get("LANG", "") or "").split(".")[0]
+    code = loc.replace("-", "_").split("_")[-1] if "_" in loc.replace("-", "_") else ""
+    return code.upper() if len(code) == 2 and code.isalpha() else "US"
+
+
+def _scrape_trending(region: str = "US", max_results: int = 8) -> list[dict]:
     if not _REQUESTS_OK:
         return []
     url = f"https://www.youtube.com/feed/trending?gl={region.upper()}"
@@ -312,7 +333,7 @@ def _handle_summarize(parameters: dict, player, speak) -> str:
     if not _TRANSCRIPT_OK:
         return "youtube-transcript-api is not installed. Run: pip install youtube-transcript-api"
 
-    url = _ask_for_url("Please paste the YouTube video URL:")
+    url = parameters.get("url", "").strip() or _ask_for_url("Please paste the YouTube video URL:")
     if not url:
         return "No URL provided, sir. Summary cancelled."
     if not _is_valid_youtube_url(url):
@@ -324,23 +345,20 @@ def _handle_summarize(parameters: dict, player, speak) -> str:
 
     if player:
         player.write_log(f"[YouTube] Summarizing: {url}")
-    if speak:
-        speak("Fetching the transcript now, sir. One moment.")
+    if player:
+        player.write_log("[YouTube] Fetching the transcript…")
 
     transcript = _get_transcript(video_id)
     if not transcript:
         return "I couldn't retrieve a transcript for that video, sir."
 
-    if speak:
-        speak("Transcript retrieved. Generating summary now.")
+    if player:
+        player.write_log("[YouTube] Transcript retrieved — summarising…")
 
     try:
         summary = _summarize_with_gemini(transcript, url)
     except Exception as e:
         return f"Summary generation failed, sir: {e}"
-
-    if speak:
-        speak(summary)
 
     if parameters.get("save", False):
         saved_path = _save_summary(summary, url)
@@ -374,14 +392,11 @@ def _handle_get_info(parameters: dict, player, speak) -> str:
     ]
     result = "\n".join(lines)
 
-    if speak:
-        speak(f"Here's the video info, sir. {result.replace(chr(10), '. ')}")
-
     return result
 
 
 def _handle_trending(parameters: dict, player, speak) -> str:
-    region = parameters.get("region", "TR").upper()
+    region = (parameters.get("region") or _default_region()).upper()
 
     if player:
         player.write_log(f"[YouTube] Trending: {region}")
@@ -393,13 +408,6 @@ def _handle_trending(parameters: dict, player, speak) -> str:
     lines  = [f"Top trending videos in {region}:"]
     lines += [f"{v['rank']}. {v['title']} — {v['channel']}" for v in trending]
     result = "\n".join(lines)
-
-    if speak:
-        top3   = trending[:3]
-        spoken = "Here are the top trending videos, sir. " + ". ".join(
-            f"Number {v['rank']}: {v['title']} by {v['channel']}" for v in top3
-        )
-        speak(spoken)
 
     return result
 
@@ -466,7 +474,7 @@ TOOL = {
             },
             "url": {
                 "type": "STRING",
-                "description": "Video URL for get_info action"
+                "description": "Video URL for get_info or summarize"
             }
         },
         "required": []

@@ -1,3 +1,5 @@
+import os
+import re
 import time
 import subprocess
 import platform
@@ -71,19 +73,32 @@ def _normalize(raw: str) -> str:
     if key in _APP_ALIASES:
         return _APP_ALIASES[key].get(_SYSTEM, raw)
 
+    # Whole names only: substring matching opened Notepad for "notepad++",
+    # Obsidian for "obs" and Git Bash for "github desktop".
     for alias_key, os_map in _APP_ALIASES.items():
-        if alias_key in key or key in alias_key:
+        if re.search(rf"(?<!\S){re.escape(alias_key)}(?!\S)", key):
             return os_map.get(_SYSTEM, raw)
 
     return raw  
 
+def _type_name(pyautogui, app_name: str) -> None:
+    """Type into Start / Spotlight. pyautogui can only type ASCII and silently
+    drops everything else, so localized names go through the clipboard."""
+    if not app_name.isascii():
+        from actions.computer_control import _paste_via_clipboard
+        if _paste_via_clipboard(app_name):
+            return
+    pyautogui.write(app_name, interval=0.05)
+
+
 def _launch_windows(app_name: str) -> bool:
 
-    if shutil.which(app_name) or shutil.which(app_name.split(".")[0]):
+    # No shell: app_name comes from the model, and "x.exe & other" was a command.
+    exe = shutil.which(app_name) or shutil.which(app_name.split(".")[0])
+    if exe:
         try:
             subprocess.Popen(
-                app_name,
-                shell=True,
+                [exe],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -94,7 +109,7 @@ def _launch_windows(app_name: str) -> bool:
 
     if ":" in app_name:
         try:
-            subprocess.Popen(f"start {app_name}", shell=True)
+            os.startfile(app_name)          # URI such as ms-settings: — no shell
             time.sleep(1.0)
             return True
         except Exception:
@@ -105,7 +120,7 @@ def _launch_windows(app_name: str) -> bool:
         pyautogui.PAUSE = 0.1
         pyautogui.press("win")
         time.sleep(0.7)
-        pyautogui.write(app_name, interval=0.05)
+        _type_name(pyautogui, app_name)
         time.sleep(0.9)
         pyautogui.press("enter")
         time.sleep(2.5)
@@ -157,7 +172,7 @@ def _launch_macos(app_name: str) -> bool:
         import pyautogui
         pyautogui.hotkey("command", "space")
         time.sleep(0.6)
-        pyautogui.write(app_name, interval=0.05)
+        _type_name(pyautogui, app_name)
         time.sleep(0.8)
         pyautogui.press("enter")
         time.sleep(1.5)
@@ -205,11 +220,9 @@ def _launch_linux(app_name: str) -> bool:
             pass
 
     try:
-        subprocess.run(
-            ["xdg-open", app_name],
-            capture_output=True, timeout=5
-        )
-        return True
+        if subprocess.run(["xdg-open", app_name],
+                          capture_output=True, timeout=5).returncode == 0:
+            return True
     except Exception:
         pass
 

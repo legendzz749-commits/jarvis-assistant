@@ -65,7 +65,10 @@ def chord_label(chord=DEFAULT_CHORD) -> str:
 
 def qt_sequence(chord=DEFAULT_CHORD) -> str:
     """The same chord as a QKeySequence string."""
-    return "+".join(_QT_NAME.get(k, k.title()) for k in chord)
+    # On macOS Qt's "Ctrl" is the Command key (so Ctrl+Space became Cmd+Space,
+    # which Spotlight owns); the physical Control key is "Meta" there.
+    names = dict(_QT_NAME, ctrl="Meta") if _OS == "Darwin" else _QT_NAME
+    return "+".join(names.get(k, k.title()) for k in chord)
 
 
 class PushToTalk:

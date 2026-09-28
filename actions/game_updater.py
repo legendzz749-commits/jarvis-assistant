@@ -9,6 +9,11 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
+if not __package__:
+    # The daily schedule runs this file as a script, which puts actions/ — not
+    # the project root — on sys.path, so `config` would not be importable.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from config import get_os, is_windows, is_mac, is_linux
 
 _CNW: dict = (
@@ -35,10 +40,8 @@ _KNOWN_APPIDS: dict[str, tuple[str, str]] = {
     "cyberpunk":           ("1091500", "Cyberpunk 2077"),
     "cyberpunk 2077":      ("1091500", "Cyberpunk 2077"),
     "elden ring":          ("1245620", "ELDEN RING"),
-    "minecraft":           ("1672970", "Minecraft Launcher"),
     "apex legends":        ("1172470", "Apex Legends"),
     "apex":                ("1172470", "Apex Legends"),
-    "fortnite":            ("1517990", "Fortnite"),
     "goose goose duck":    ("1568590", "Goose Goose Duck"),
     "among us":            ("945360",  "Among Us"),
     "fall guys":           ("1097150", "Fall Guys"),
@@ -109,6 +112,9 @@ def _find_steam_linux() -> Path | None:
         Path.home() / ".steam" / "steam",
         Path.home() / ".steam" / "root",
         Path.home() / ".local"  / "share" / "Steam",
+        # Flatpak and Snap keep their data inside the sandbox
+        Path.home() / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam",
+        Path.home() / "snap" / "steam" / "common" / ".local" / "share" / "Steam",
         Path("/usr/share/steam"),
         Path("/opt/steam"),
     ]:
@@ -140,7 +146,7 @@ def _get_steam_libraries(steam_path: Path) -> list[Path]:
         content = vdf_path.read_text(encoding="utf-8", errors="ignore")
         for raw_path in re.findall(r'"path"\s+"([^"]+)"', content):
             lib = Path(raw_path.replace("\\\\", "/")) / "steamapps"
-            if lib.exists() and lib not in libraries:
+            if lib.exists() and lib.resolve() not in {x.resolve() for x in libraries}:
                 libraries.append(lib)
     except Exception:
         pass
@@ -182,11 +188,19 @@ def _is_steam_running() -> bool:
     except Exception:
         return False
 
+def _is_steam_window(title: str) -> bool:
+    """Steam's own windows ('Steam', 'Sign in to Steam') — not a browser tab
+    such as 'ELDEN RING on Steam - Google Chrome', which 'steam' in title
+    also matched, and which then got clicked and typed into."""
+    return bool(re.fullmatch(r"(sign in to )?steam( .*)?", title.strip().lower())) \
+        and " - " not in title
+
+
 def _get_steam_window_rect() -> tuple[int, int, int, int] | None:
     try:
         import pygetwindow as gw
         for w in gw.getAllWindows():
-            if "steam" in w.title.lower() and w.width > 200 and w.visible:
+            if _is_steam_window(w.title) and w.width > 200 and w.visible:
                 return w.left, w.top, w.width, w.height
     except Exception:
         pass
@@ -296,7 +310,7 @@ def _select_drive_in_dialog(dialog, drive_letter: str) -> bool:
     for control_type in ("ListItem", "RadioButton"):
         try:
             for ctrl in dialog.descendants(control_type=control_type):
-                if target in ctrl.window_text().upper():
+                if re.search(rf"\b{re.escape(target)}:", ctrl.window_text().upper()):
                     ctrl.click_input()
                     print(f"[GameUpdater] ✅ Drive selected ({control_type}): {ctrl.window_text()}")
                     return True
@@ -343,44 +357,11 @@ def _click_button(window, keywords: list[str]) -> bool:
 
 
 def _handle_install_dialog_pyautogui(game_name: str, best_drive: dict) -> str:
-    try:
-        import pyautogui
-        import pygetwindow as gw
-    except ImportError:
-        return (f"Install dialog opened for '{game_name}'. "
-                f"Please select '{best_drive['letter']}:' and click Install manually.")
-
-    pyautogui.FAILSAFE = False
-    drive_label = f"{best_drive['letter']}:"
-    install_win = None
-
-    for _ in range(30):
-        time.sleep(0.5)
-        for w in gw.getAllWindows():
-            if ("install" in w.title.lower() or "steam" in w.title.lower()) \
-                    and w.width > 300 and w.visible:
-                install_win = w
-                break
-        if install_win:
-            break
-
-    if not install_win:
-        return f"Please select '{drive_label}' and click Install in Steam for '{game_name}'."
-
-    try:
-        install_win.activate()
-        time.sleep(0.4)
-    except Exception:
-        pass
-
-    wx, wy = install_win.left, install_win.top
-    ww, wh = install_win.width, install_win.height
-    pyautogui.click(wx + int(ww * 0.35), wy + int(wh * 0.45))
-    time.sleep(0.2)
-    pyautogui.typewrite(best_drive["letter"], interval=0.05)
-    time.sleep(0.2)
-    pyautogui.click(wx + int(ww * 0.72), wy + int(wh * 0.88))
-    return f"Attempted drive {drive_label} selection and Install click for '{game_name}'."
+    # Used to click two guessed spots and type a drive letter into any window
+    # whose title contained "install" or "steam" (a browser tab, an installer…).
+    # Without pywinauto nothing identifies the dialog's controls, so ask instead.
+    return (f"The Steam install dialog for '{game_name}' is open. Choose "
+            f"'{best_drive['letter']}:' ({best_drive['free_gb']:.0f} GB free) and click Install.")
 
 
 def _handle_install_dialog(game_name: str) -> str:
@@ -490,11 +471,6 @@ def _search_steam_appid(game_name: str) -> tuple[str | None, str | None]:
         app_id, canonical = _KNOWN_APPIDS[name_lower]
         print(f"[GameUpdater] 📖 Bilinen: {canonical} ({app_id})")
         return app_id, canonical
-
-    for key, (app_id, canonical) in _KNOWN_APPIDS.items():
-        if name_lower in key or key in name_lower:
-            print(f"[GameUpdater] 📖 Partial match: {canonical} ({app_id})")
-            return app_id, canonical
 
     try:
         import urllib.request, urllib.parse
@@ -618,8 +594,8 @@ def _install_steam_game(steam_path: Path, game_name: str = None,
 
 def _get_download_status(steam_path: Path) -> str:
     games   = _get_steam_games(steam_path)
-    active  = [g for g in games if g["state"] == 1026]
-    pending = [g for g in games if g["state"] in (6, 516)]
+    active  = [g for g in games if _downloading(g["state"])]
+    pending = [g for g in games if g["state"] & 2 and not _downloading(g["state"])]
     lines   = []
     if active:
         lines.append(f"Downloading: {', '.join(g['name'] for g in active)}.")
@@ -628,6 +604,16 @@ def _get_download_status(steam_path: Path) -> str:
         suffix = f" and {len(pending) - 5} more" if len(pending) > 5 else ""
         lines.append(f"Pending updates: {names}{suffix}.")
     return " ".join(lines) if lines else "No active downloads or pending updates."
+
+
+def _downloading(state: int) -> bool:
+    return bool(state & 1024) and not state & 512
+
+
+def _update_finished(state: int) -> bool:
+    """Installed and nothing outstanding. A paused or queued download still has
+    'update required' set — equality with 1026 read those as finished."""
+    return bool(state & 4) and not state & (2 | 1024)
 
 
 def _system_shutdown() -> None:
@@ -639,6 +625,23 @@ def _system_shutdown() -> None:
         subprocess.run(["systemctl", "poweroff"])
 
 
+def _arm_auto_shutdown(steam_path: Path, speak=None) -> str:
+    """Shutting the PC down is irreversible, so the watcher is only started
+    once the user presses CONFIRM on the HUD — then it can run unattended."""
+    from core import confirm
+    if confirm.pending_title():
+        return "Auto-shutdown not armed: another confirmation is waiting on screen."
+
+    def _start() -> str:
+        threading.Thread(target=_watch_and_shutdown,
+                         kwargs={"steam_path": steam_path, "speak": speak},
+                         daemon=True).start()
+        return "Auto-shutdown armed."
+    return confirm.request(key="auto_shutdown",
+                           title="Shut the PC down when the download finishes",
+                           detail="Steam download → power off", run=_start)
+
+
 def _watch_and_shutdown(steam_path: Path, speak=None,
                         check_interval: int = 30, timeout_hours: int = 12):
     print("[GameUpdater]...")
@@ -646,7 +649,7 @@ def _watch_and_shutdown(steam_path: Path, speak=None,
 
     for _ in range(24):
         time.sleep(5)
-        active = [g for g in _get_steam_games(steam_path) if g["state"] == 1026]
+        active = [g for g in _get_steam_games(steam_path) if _downloading(g["state"])]
         if active:
             names = ", ".join(g["name"] for g in active)
             if speak:
@@ -655,9 +658,11 @@ def _watch_and_shutdown(steam_path: Path, speak=None,
     else:
         return  
 
+    watched = {g["id"] for g in active}
     while time.time() < deadline:
         time.sleep(check_interval)
-        if not any(g["state"] == 1026 for g in _get_steam_games(steam_path)):
+        states = {g["id"]: g["state"] for g in _get_steam_games(steam_path)}
+        if all(_update_finished(states.get(i, 0)) for i in watched):
             if speak:
                 speak("Download complete. Shutting down now.")
             time.sleep(5)
@@ -677,6 +682,17 @@ def _find_epic_exe() -> Path | None:
 def _find_epic_exe_windows() -> Path | None:
     try:
         import winreg
+        # The com.epicgames.launcher:// protocol handler names the real exe.
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT,
+                                r"com.epicgames.launcher\shell\open\command") as key:
+                cmd, _ = winreg.QueryValueEx(key, "")
+            m = re.match(r'\s*"([^"]+\.exe)"|\s*(\S+\.exe)', cmd, re.IGNORECASE)
+            exe = Path(m.group(1) or m.group(2)) if m else None
+            if exe and exe.exists():
+                return exe
+        except OSError:
+            pass
         for hive, key_path in [
             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\EpicGames\EpicGamesLauncher"),
             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\EpicGames\EpicGamesLauncher"),
@@ -774,7 +790,7 @@ def _update_epic_games(epic_exe: Path, game_name: str = None) -> str:
                 subprocess.Popen([str(epic_exe), url] if epic_exe else ["xdg-open", url])
             else:
                 subprocess.Popen([str(epic_exe), url])
-            return f"Opened Epic for '{matched[0]['name']}'."
+            return f"Launched '{matched[0]['name']}' through Epic — it updates before starting."
         except Exception as e:
             return f"Epic update failed: {e}"
     else:
@@ -790,11 +806,10 @@ def _update_epic_games(epic_exe: Path, game_name: str = None) -> str:
             else:
 
                 if _is_epic_running():
-                    for g in games[:10]:
-                        subprocess.Popen([str(epic_exe),
-                            f"com.epicgames.launcher://apps/{g['id']}?action=launch&silent=true"])
-                        time.sleep(0.5)
-                    return f"Triggered update check for {len(games)} Epic game(s)."
+                    # action=launch would START each game. Opening the library
+                    # makes the running launcher check its installed games.
+                    subprocess.Popen([str(epic_exe),
+                                      "com.epicgames.launcher://store/library"])
                 else:
                     subprocess.Popen([str(epic_exe)])
             count = len(games)
@@ -998,24 +1013,25 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                     is_installed = any(
                         name_lower in g["name"].lower() for g in installed
                     )
-                    if not is_installed:
+                    if not is_installed and action == "install":
                         msg = _install_steam_game(
                             steam_path, game_name=game_name, app_id=app_id
                         )
                         if shutdown:
-                            threading.Thread(
-                                target=_watch_and_shutdown,
-                                kwargs={"steam_path": steam_path, "speak": speak},
-                                daemon=True
-                            ).start()
-                            msg += " Auto-shutdown enabled."
+                            msg += " " + _arm_auto_shutdown(steam_path, speak)
                         if player: player.write_log(f"[GameUpdater] {msg[:100]}")
-                        if speak:  speak(msg)
                         return msg
+                    elif not is_installed:
+                        results.append(f"Steam: '{game_name}' is not installed.")
                     else:
                         results.append(
                             f"Steam: {_update_steam_games(steam_path, game_name=game_name)}"
                         )
+                elif action == "install" and app_id:
+                    msg = _install_steam_game(steam_path, game_name=game_name, app_id=app_id)
+                    if shutdown:
+                        msg += " " + _arm_auto_shutdown(steam_path, speak)
+                    return msg
                 else:
                     if action == "install":
                         results.append("Steam: Please specify a game name to install.")
@@ -1023,12 +1039,7 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                         results.append(f"Steam: {_update_steam_games(steam_path)}")
 
                 if shutdown:
-                    threading.Thread(
-                        target=_watch_and_shutdown,
-                        kwargs={"steam_path": steam_path, "speak": speak},
-                        daemon=True
-                    ).start()
-                    results.append("Auto-shutdown enabled.")
+                    results.append(_arm_auto_shutdown(steam_path, speak))
 
         if platform in ("epic", "both"):
             if is_linux():
@@ -1046,7 +1057,6 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
 
         output = " | ".join(results) or "Nothing to do."
         if player: player.write_log(f"[GameUpdater] {output[:100]}")
-        if speak:  speak(output)
         return output
 
     return f"Unknown action: '{action}'."

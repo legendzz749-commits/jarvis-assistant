@@ -2,18 +2,18 @@
 file_processor.py — JARVIS Universal File Processor
 
 Supported types:
-  image   → describe, ocr, resize, convert, compress, crop
-  pdf     → summarize, extract_text, extract_pages, to_word
-  docx    → summarize, extract_text, reformat, translate_hint
-  txt/md  → summarize, reformat, translate_hint, word_count
-  csv     → analyze, filter, sort, convert, stats
-  xlsx    → analyze, filter, convert, stats
-  json    → validate, format, extract, convert
-  code    → explain, review, fix, run, document
+  image   → describe, ocr, resize, convert, compress, info
+  pdf     → summarize, extract_text, to_word, info
+  docx    → summarize, extract_text, reformat, translate_hint, word_count
+  txt/md  → summarize, extract_text, reformat, translate_hint, word_count
+  csv     → analyze, filter, sort, convert, stats, info
+  xlsx    → analyze, filter, sort, convert, stats, info
+  json    → validate, format, analyze, extract, to_csv
+  code    → explain, review, fix, optimize, document, run, info
   audio   → transcribe, trim, convert, info
-  video   → trim, extract_audio, extract_frame, info, compress
+  video   → trim, extract_audio, extract_frame, compress, transcribe, convert, info
   zip     → list, extract
-  pptx    → summarize, extract_text, to_pdf
+  pptx    → summarize, extract_text, analyze
 """
 
 import os
@@ -21,12 +21,14 @@ import re
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from datetime import datetime
 
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
 from core import gemini
+from google.genai import types
 
 def _get_api_key() -> str:
     config_path = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
@@ -49,7 +51,7 @@ def _gemini_client(tier: str = gemini.SMART):
 
 def _detect_type(path: Path) -> str:
     ext = path.suffix.lower().lstrip(".")
-    image_exts = {"jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "svg", "ico"}
+    image_exts = {"jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"}   # svg is XML text
     video_exts = {"mp4", "avi", "mov", "mkv", "wmv", "flv", "webm", "m4v", "3gp"}
     audio_exts = {"mp3", "wav", "ogg", "m4a", "aac", "flac", "wma", "opus"}
     code_exts  = {"py", "js", "ts", "jsx", "tsx", "html", "css", "java", "c",
@@ -108,7 +110,11 @@ def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
             if params.get("instruction"):
                 prompt = params["instruction"]
 
-            response = model.generate_content([prompt, img])
+            # A raw PIL image is not a google-genai Part: the Live rung drops it
+            # silently and answers the prompt without ever seeing the picture.
+            part = types.Part.from_bytes(data=path.read_bytes(),
+                                         mime_type=Image.MIME.get(img.format, "image/png"))
+            response = model.generate_content([prompt, part])
             result   = response.text.strip()
 
             if len(result) > 500 and params.get("save", True):
@@ -148,7 +154,9 @@ def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
                    "webp": "WEBP", "bmp": "BMP", "tiff": "TIFF"}
         pil_fmt = fmt_map.get(fmt, fmt.upper())
         try:
-            img = Image.open(path).convert("RGB") if fmt == "jpg" else Image.open(path)
+            img = Image.open(path)
+            if pil_fmt == "JPEG" and img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")      # JPEG has no alpha or palette
             out = _output_path(path, "converted", f".{fmt}")
             img.save(out, pil_fmt)
             return f"Converted to {fmt.upper()}. Saved: {out.name}"
@@ -187,13 +195,17 @@ def _process_pdf(path: Path, action: str, params: dict, speak=None) -> str:
             with pdfplumber.open(path) as pdf:
                 for page in pdf.pages:
                     text += (page.extract_text() or "") + "\n"
+                    if len(text) >= max_chars:
+                        break
         except ImportError:
             try:
                 import PyPDF2
                 with open(path, "rb") as f:
                     reader = PyPDF2.PdfReader(f)
                     for page in reader.pages:
-                        text += page.extract_text() + "\n"
+                        text += (page.extract_text() or "") + "\n"
+                        if len(text) >= max_chars:
+                            break
             except ImportError:
                 return ""
         return text[:max_chars]
@@ -254,6 +266,41 @@ def _process_pdf(path: Path, action: str, params: dict, speak=None) -> str:
 
     return f"Unknown PDF action: '{action}'. Try: summarize, extract_text, info, to_word"
 
+def _docx_table_rows(tables) -> list[str]:
+    """One " | "-joined line per table row, nested tables included. A merged
+    cell is reported once, not once per grid column it spans."""
+    rows = []
+    for table in tables:
+        for row in table.rows:
+            seen, cells = set(), []
+            for cell in row.cells:
+                if id(cell._tc) in seen:
+                    continue
+                seen.add(id(cell._tc))
+                if cell.text.strip():
+                    cells.append(cell.text.strip())
+                rows.extend(_docx_table_rows(cell.tables))
+            if cells:
+                rows.append(" | ".join(cells))
+    return rows
+
+
+def _pptx_shape_text(shapes) -> list[str]:
+    """Text of every shape, including table cells and grouped shapes."""
+    lines = []
+    for shape in shapes:
+        if hasattr(shape, "shapes"):                       # a group
+            lines.extend(_pptx_shape_text(shape.shapes))
+        elif getattr(shape, "has_table", False):
+            for row in shape.table.rows:
+                cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                if cells:
+                    lines.append(" | ".join(cells))
+        elif getattr(shape, "has_text_frame", False) and shape.text_frame.text.strip():
+            lines.append(shape.text_frame.text.strip())
+    return lines
+
+
 def _process_text_doc(path: Path, file_type: str, action: str,
                        params: dict, speak=None) -> str:
     action = action or "summarize"
@@ -263,15 +310,20 @@ def _process_text_doc(path: Path, file_type: str, action: str,
             try:
                 from docx import Document
                 doc  = Document(path)
-                return "\n".join(p.text for p in doc.paragraphs)
+                # Tables hold the key figures of invoices and reports.
+                return "\n".join([p.text for p in doc.paragraphs] + _docx_table_rows(doc.tables))
             except ImportError:
-                return "python-docx not installed."
+                raise ValueError("python-docx is not installed (pip install python-docx).") from None
             except Exception as e:
-                return f"Read failed: {e}"
+                raise ValueError(f"Could not read this document ({e}). Legacy .doc files "
+                                 f"are not supported — save it as .docx.") from e
         else:
             return path.read_text(encoding="utf-8", errors="ignore")
 
-    content = _read_content()
+    try:
+        content = _read_content()
+    except ValueError as e:
+        return str(e)
     if not content.strip():
         return "File appears to be empty."
 
@@ -282,7 +334,7 @@ def _process_text_doc(path: Path, file_type: str, action: str,
         return f"Word count: {words} words, {chars} characters, {lines} lines."
 
     if action == "extract_text":
-        if file_type != "txt":
+        if file_type not in ("txt", "text"):     # plain text is returned, not copied
             out = _output_path(path, "extracted", ".txt")
             out.write_text(content, encoding="utf-8")
             return f"Text extracted. Saved: {out.name}"
@@ -300,9 +352,9 @@ def _process_text_doc(path: Path, file_type: str, action: str,
     }
 
     if action not in prompt_map:
-
-        action  = "custom"
-        instruction = action
+        # "make it formal", "list the dates"… the action IS the instruction
+        prompt_map["custom"] = f"{instruction or action}\n\n{content[:40000]}"
+        action = "custom"
 
     try:
         model    = _gemini_client()
@@ -328,7 +380,8 @@ def _process_data(path: Path, file_type: str, action: str,
 
     try:
         if file_type == "csv":
-            df = pd.read_csv(path, encoding="utf-8", errors="replace")
+            df = pd.read_csv(path, encoding="utf-8", encoding_errors="replace",
+                             sep="\t" if path.suffix.lower() == ".tsv" else ",")
         else:
             df = pd.read_excel(path)
     except Exception as e:
@@ -361,6 +414,8 @@ def _process_data(path: Path, file_type: str, action: str,
     if action in ("convert", "to_csv", "to_excel", "to_json"):
         fmt = {"to_csv": "csv", "to_excel": "xlsx", "to_json": "json",
                "convert": params.get("format", "csv")}.get(action, "csv")
+        fmt = str(fmt).lower().lstrip(".")
+        fmt = {"excel": "xlsx", "xls": "xlsx"}.get(fmt, fmt)
         try:
             if fmt == "csv":
                 out = _output_path(path, "converted", ".csv")
@@ -371,6 +426,8 @@ def _process_data(path: Path, file_type: str, action: str,
             elif fmt == "json":
                 out = _output_path(path, "converted", ".json")
                 df.to_json(out, orient="records", force_ascii=False, indent=2)
+            else:
+                return f"Unsupported format '{fmt}'. Use csv, xlsx or json."
             return f"Converted to {fmt.upper()}. Saved: {out.name}"
         except Exception as e:
             return f"Convert failed: {e}"
@@ -380,9 +437,13 @@ def _process_data(path: Path, file_type: str, action: str,
         value     = params.get("value", "")
         condition = params.get("condition", "equals")
         if not col or col not in df.columns:
-            return f"Column '{col}' not found. Available: {', '.join(df.columns)}"
+            return f"Column '{col}' not found. Available: {', '.join(map(str, df.columns))}"
         try:
-            if condition == "equals":     filtered = df[df[col] == value]
+            if condition == "equals":
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    filtered = df[df[col] == float(value)]
+                else:
+                    filtered = df[df[col].astype(str) == str(value)]
             elif condition == "contains": filtered = df[df[col].astype(str).str.contains(str(value), case=False)]
             elif condition == "gt":       filtered = df[df[col] > float(value)]
             elif condition == "lt":       filtered = df[df[col] < float(value)]
@@ -398,8 +459,12 @@ def _process_data(path: Path, file_type: str, action: str,
         asc = params.get("ascending", True)
         try:
             sorted_df = df.sort_values(col, ascending=asc)
-            out = _output_path(path, "sorted", path.suffix)
-            sorted_df.to_csv(out, index=False)
+            if file_type == "csv":
+                out = _output_path(path, "sorted", path.suffix)
+                sorted_df.to_csv(out, index=False, sep="\t" if path.suffix.lower() == ".tsv" else ",")
+            else:
+                out = _output_path(path, "sorted", ".xlsx")
+                sorted_df.to_excel(out, index=False)
             return f"Sorted by '{col}'. Saved: {out.name}"
         except Exception as e:
             return f"Sort failed: {e}"
@@ -415,10 +480,15 @@ def _process_data(path: Path, file_type: str, action: str,
         return f"Processing failed: {e}"
 
 
+def _seconds(value) -> float:
+    """'90', '1:30' or '00:01:30' → 90.0"""
+    return sum(float(part) * 60 ** i for i, part in enumerate(reversed(str(value).split(":"))))
+
+
 def _process_json(path: Path, action: str, params: dict, speak=None) -> str:
     action = action or "analyze"
     try:
-        content = path.read_text(encoding="utf-8")
+        content = path.read_text(encoding="utf-8-sig")   # Notepad adds a BOM
         data    = json.loads(content)
     except Exception as e:
         return f"Invalid JSON: {e}"
@@ -466,7 +536,7 @@ def _process_code(path: Path, action: str, params: dict, speak=None) -> str:
         if ext == "py":
             try:
                 result = subprocess.run(
-                    ["python", str(path)],
+                    [sys.executable, str(path)],
                     capture_output=True, text=True, timeout=30
                 )
                 out = result.stdout or result.stderr
@@ -538,13 +608,13 @@ def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
             model   = _gemini_client()
             content = path.read_bytes()
             mime    = {
-                "mp3": "audio/mp3", "wav": "audio/wav",
+                "mp3": "audio/mpeg", "wav": "audio/wav",
                 "ogg": "audio/ogg", "m4a": "audio/mp4",
                 "aac": "audio/aac", "flac": "audio/flac",
             }.get(path.suffix.lstrip(".").lower(), "audio/mpeg")
             response = model.generate_content([
                 "Transcribe all speech in this audio file accurately.",
-                {"mime_type": mime, "data": content}
+                types.Part.from_bytes(data=content, mime_type=mime),
             ])
             result = response.text.strip()
             if params.get("save", True):
@@ -569,9 +639,9 @@ def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
             return f"Convert failed: {e}"
 
     if action == "trim":
-        start = float(params.get("start", 0))
-        end   = float(params.get("end",   0))
         try:
+            start = _seconds(params.get("start", 0))
+            end   = _seconds(params.get("end",   0))
             from pydub import AudioSegment
             audio   = AudioSegment.from_file(path)
             end_ms  = int(end * 1000)   if end   else len(audio)
@@ -625,7 +695,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
         try:
             subprocess.run(
                 ["ffmpeg", "-i", str(path), "-q:a", "0", "-map", "a", str(out), "-y"],
-                capture_output=True, timeout=300
+                capture_output=True, timeout=300, check=True
             )
             return f"Audio extracted. Saved: {out.name}"
         except Exception as e:
@@ -642,7 +712,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             if end:
                 cmd += ["-to", str(end)]
             cmd += ["-c", "copy", str(out), "-y"]
-            subprocess.run(cmd, capture_output=True, timeout=600)
+            subprocess.run(cmd, capture_output=True, timeout=600, check=True)
             return f"Trimmed video saved: {out.name}"
         except Exception as e:
             return f"Trim failed: {e}"
@@ -656,14 +726,16 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             subprocess.run(
                 ["ffmpeg", "-i", str(path), "-ss", timestamp,
                  "-vframes", "1", str(out), "-y"],
-                capture_output=True, timeout=30
+                capture_output=True, timeout=30, check=True
             )
             return f"Frame extracted at {timestamp}. Saved: {out.name}"
         except Exception as e:
             return f"Extract frame failed: {e}"
 
     if action == "compress":
-        crf = int(params.get("quality", 28))  
+        # "quality" means 0-100 (higher = better) everywhere else; x264's CRF
+        # runs the other way (0 best … 51 worst). 70 maps to the old default 28.
+        crf = int(round(51 - 0.33 * max(0, min(100, int(params.get("quality", 70))))))
         if not _ffmpeg_available():
             return "ffmpeg not found."
         out = _output_path(path, f"compressed_crf{crf}", ".mp4")
@@ -673,7 +745,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
                  "-c:v", "libx264", "-crf", str(crf),
                  "-preset", "medium", "-c:a", "copy",
                  str(out), "-y"],
-                capture_output=True, timeout=1800
+                capture_output=True, timeout=1800, check=True
             )
             before = _file_size_str(path)
             after  = _file_size_str(out)
@@ -689,7 +761,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             subprocess.run(
                 ["ffmpeg", "-i", str(path), "-q:a", "0", "-map", "a",
                  str(tmp_audio), "-y"],
-                capture_output=True, timeout=300
+                capture_output=True, timeout=300, check=True
             )
             result = _process_audio(tmp_audio, "transcribe", params, speak)
             return result
@@ -707,7 +779,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
         try:
             subprocess.run(
                 ["ffmpeg", "-i", str(path), str(out), "-y"],
-                capture_output=True, timeout=1800
+                capture_output=True, timeout=1800, check=True
             )
             return f"Converted to {fmt.upper()}. Saved: {out.name}"
         except Exception as e:
@@ -740,8 +812,13 @@ def _process_archive(path: Path, action: str, params: dict, speak=None) -> str:
         dest = Path(params.get("destination", str(path.parent / path.stem)))
         dest.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.unpack_archive(path, dest)
+            # filter="data" rejects members that escape dest ("../", absolute
+            # paths, links out). Without it, 3.11–3.13 trust the archive fully.
+            shutil.unpack_archive(path, dest, filter="data")
             return f"Extracted to: {dest}"
+        except TypeError:
+            return ("Extract refused: this Python has no safe-extraction filter. "
+                    "Update to Python 3.11.4 or newer.")
         except Exception as e:
             return f"Extract failed: {e}"
 
@@ -757,9 +834,8 @@ def _process_pptx(path: Path, action: str, params: dict, speak=None) -> str:
             text = []
             for i, slide in enumerate(prs.slides, 1):
                 slide_text = f"\n--- Slide {i} ---\n"
-                for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text.strip():
-                        slide_text += shape.text.strip() + "\n"
+                for line in _pptx_shape_text(slide.shapes):
+                    slide_text += line + "\n"
                 text.append(slide_text)
             return "\n".join(text)
         except ImportError:
@@ -786,7 +862,7 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
     if not file_path_str:
         return "No file path provided."
 
-    path = Path(file_path_str)
+    path = Path(file_path_str).expanduser()
     if not path.exists():
         return f"File not found: {file_path_str}"
     if not path.is_file():
@@ -820,7 +896,7 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
         "csv":     lambda p, a, pm, s: _process_data(p, "csv",   a, pm, s),
         "excel":   lambda p, a, pm, s: _process_data(p, "excel", a, pm, s),
         "json":    _process_json,
-        "xml":     lambda p, a, pm, s: _process_json(p, a, pm, s),  
+        "xml":     lambda p, a, pm, s: _process_text_doc(p, "text", a, pm, s),  
         "code":    _process_code,
         "audio":   _process_audio,
         "video":   _process_video,

@@ -1,0 +1,158 @@
+"""Regression tests for desktop organize/clean/wallpaper and the topic monitor."""
+import pytest
+
+from actions import background_monitor as bm
+from actions import desktop
+from core import undo
+
+
+@pytest.fixture
+def desk(tmp_path, monkeypatch):
+    d = tmp_path / "Desktop"
+    d.mkdir()
+    monkeypatch.setattr(desktop, "_get_desktop", lambda: d)
+    undo.clear()
+    yield d
+    undo.clear()
+
+
+def test_organize_is_undoable_and_survives_a_locked_file(desk, monkeypatch):
+    for name in ("a.png", "b.pdf", "c.mp3"):
+        (desk / name).write_text(name)
+    real = desktop.shutil.move
+
+    def flaky(src, dst):
+        if src.endswith("b.pdf"):
+            raise PermissionError("in use")
+        return real(src, dst)
+    monkeypatch.setattr(desktop.shutil, "move", flaky)
+
+    out = desktop.organize_desktop()
+    monkeypatch.setattr(desktop.shutil, "move", real)
+    undo.undo_last()
+
+    assert "could not be moved" in out
+    assert sorted(p.name for p in desk.iterdir()) == ["a.png", "b.pdf", "c.mp3"]
+
+
+def test_clean_desktop_can_be_undone(desk):
+    (desk / "notes.txt").write_text("x")
+    desktop.clean_desktop()
+    undo.undo_last()
+    assert (desk / "notes.txt").read_text() == "x"
+    assert [p.name for p in desk.iterdir()] == ["notes.txt"]
+
+
+def test_generated_code_can_use_the_shutil_shim(tmp_path):
+    src = tmp_path / "a.txt"
+    src.write_text("x")
+    out = desktop._execute_generated_code(
+        f"shutil.copy2({str(src)!r}, {str(tmp_path / 'b.txt')!r})\nprint('ok')")
+    assert (tmp_path / "b.txt").exists(), out
+
+
+def test_wallpaper_download_is_kept_and_bounded(tmp_path, monkeypatch):
+    import io
+    import urllib.request
+    monkeypatch.setattr(desktop.Path, "home", classmethod(lambda cls: tmp_path))
+    set_to = []
+    monkeypatch.setattr(desktop, "set_wallpaper", lambda p: set_to.append(p) or "Wallpaper set")
+    timeouts = []
+
+    def fake_urlopen(url, timeout=None):
+        timeouts.append(timeout)
+        return io.BytesIO(b"\x89PNG fake")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    desktop.set_wallpaper_from_url("https://example.com/a.png")
+
+    assert timeouts == [15]
+    assert desktop.Path(set_to[0]).exists()           # the OS re-reads this file later
+
+
+def test_non_latin_topics_get_distinct_keys():
+    assert bm._slug("Galatasaray") != bm._slug("Москва") != bm._slug("東京")
+    assert bm._slug("Москва") and bm._slug("東京")
+
+
+def test_failed_or_web_page_results_are_not_announced_or_marked_checked(monkeypatch):
+    saved = {}
+    monitors = {"ai": {"topic": "AI"}}
+    monkeypatch.setattr(bm, "_load", lambda: {k: dict(v) for k, v in monitors.items()})
+    monkeypatch.setattr(bm, "_save", lambda m: saved.update(m))
+    import actions.web_search as ws
+    monkeypatch.setattr(ws, "_ddg_news", lambda q, max_results=5: [{"title": "Some homepage", "url": "x"}])
+
+    assert bm.check_all() == []
+    assert "last_check" not in saved.get("ai", {})
+
+
+def test_check_does_not_resurrect_a_monitor_removed_meanwhile(monkeypatch):
+    store = {"ai": {"topic": "AI"}, "f1": {"topic": "F1"}}
+    saved = {}
+
+    def load():
+        return {k: dict(v) for k, v in store.items()}
+
+    def news(q, max_results=5):
+        store.pop("f1", None)                          # user removes F1 during the check
+        return [{"title": f"{q} headline", "source": "Reuters"}]
+    monkeypatch.setattr(bm, "_load", load)
+    monkeypatch.setattr(bm, "_save", lambda m: saved.update(m))
+    import actions.web_search as ws
+    monkeypatch.setattr(ws, "_ddg_news", news)
+
+    bm.check_all()
+    assert "f1" not in saved
+
+
+def test_blocked_topics_match_whole_words():
+    assert bm._is_blocked("bitcoin price") and bm._is_blocked("仮想通貨ニュース")
+    assert not bm._is_blocked("cryptography research") and not bm._is_blocked("Kryptonite")
+
+
+def test_gemini_failure_is_not_executed_as_code():
+    out = desktop._confirm_and_execute("tidy", "ERROR: every Gemini model on the ladder failed")
+    assert "Could not work out" in out
+
+
+def test_desktop_ini_is_left_alone_on_windows(desk, monkeypatch):
+    monkeypatch.setattr(desktop, "_OS", "Windows")
+    (desk / "desktop.ini").write_text("[.ShellClassInfo]")
+    desktop.organize_desktop()
+    assert (desk / "desktop.ini").exists()
+
+
+@pytest.mark.parametrize("env", ["GNOME", "KDE", "XFCE"])
+def test_wallpaper_failure_is_reported(tmp_path, monkeypatch, env):
+    from types import SimpleNamespace
+    img = tmp_path / "wall.png"
+    img.write_bytes(b"x")
+    monkeypatch.setattr(desktop, "_OS", "Linux")
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", env)
+    monkeypatch.setattr(desktop.subprocess, "run",
+                        lambda argv, **k: SimpleNamespace(returncode=1, stdout=""))
+    assert not desktop.set_wallpaper(str(img)).startswith("Wallpaper set")
+
+
+def test_xfce_wallpaper_is_set_on_every_named_monitor(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    img = tmp_path / "wall.png"
+    img.write_bytes(b"x")
+    monkeypatch.setattr(desktop, "_OS", "Linux")
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "XFCE")
+    props = ["/backdrop/screen0/monitoreDP-1/workspace0/last-image",
+             "/backdrop/screen0/monitorHDMI-1/workspace0/last-image"]
+    calls = []
+    def run(argv, **k):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="\n".join(props + ["/backdrop/single-workspace-mode"]))
+    monkeypatch.setattr(desktop.subprocess, "run", run)
+    assert desktop.set_wallpaper(str(img)).startswith("Wallpaper set")
+    assert {c[4] for c in calls if "-s" in c} == set(props)
+
+
+def test_everyday_generated_code_runs_in_the_sandbox():
+    code = ("try:\n    raise PermissionError('locked')\nexcept PermissionError:\n"
+            "    print(round(2.345, 1), any([0, 1]), sorted(set([2, 1, 2])), sep=', ')")
+    assert desktop._execute_generated_code(code) == "2.3, True, [1, 2]"

@@ -185,8 +185,10 @@ def discover_actions(actions_dir: Path, reserved_names: set[str] | None = None,
                 sys.modules[module_name] = module
                 try:
                     spec.loader.exec_module(module)
-                except Exception:
+                except (Exception, SystemExit) as e:
                     sys.modules.pop(module_name, None)
+                    if isinstance(e, SystemExit):
+                        raise ImportError(f"exited during import: {e}") from e
                     raise
 
             if getattr(module, "TOOL", None) is None:

@@ -96,6 +96,26 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
     with _lock:
         _pending = _Pending(key=key, title=title, detail=detail,
                             run=run, at=time.monotonic())
+        mine = _pending
+
+    def _expire() -> None:
+        # Take the banner down when it lapses; it used to stay on the HUD, and
+        # pressing its CONFIRM later silently did nothing.
+        global _pending
+        with _lock:
+            if _pending is not mine:
+                return
+            _pending = None
+        if _hide_cb:
+            try:
+                _hide_cb()
+            except Exception:
+                pass
+        _log(f"SYS: Confirmation expired — {title}")
+
+    timer = threading.Timer(TIMEOUT_SECONDS, _expire)
+    timer.daemon = True
+    timer.start()
 
     try:
         _show_cb(title, detail)
